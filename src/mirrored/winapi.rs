@@ -21,22 +21,20 @@ pub use winapi::shared::ntdef::HANDLE;
 
 use super::AllocError;
 
-/// Returns the size of an allocation unit in bytes.
+/// Returns the virtual memory allocation granularity in bytes.
 ///
-/// In Windows calls to `VirtualAlloc` must specify a multiple of
-/// `SYSTEM_INFO::dwAllocationGranularity` bytes.
+/// On Windows, when reserving virtual address space with `VirtualAlloc`
+/// (using `MEM_RESERVE`), the returned base address is always aligned to
+/// a multiple of this value.
 ///
-/// FIXME: the allocation granularity should always be larger than the page
-/// size (64k vs 4k), so determining the page size here is not necessary.
+/// NOTE: This value (typically 64KB) is guaranteed by the Windows memory
+/// architecture to be greater than or equal to the system page size (typically 4KB).
 pub fn allocation_granularity() -> usize {
     unsafe {
         let mut system_info = mem::MaybeUninit::<SYSTEM_INFO>::uninit();
         GetSystemInfo(system_info.as_mut_ptr() as LPSYSTEM_INFO);
         let system_info = system_info.assume_init();
-        let allocation_granularity =
-            system_info.dwAllocationGranularity as usize;
-        let page_size = system_info.dwPageSize as usize;
-        page_size.max(allocation_granularity)
+        system_info.dwAllocationGranularity as usize
     }
 }
 
