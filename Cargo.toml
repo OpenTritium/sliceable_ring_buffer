@@ -38,6 +38,8 @@ use_std = [ "libc/use_std" ]
 # shared-memory implementation instead of system-specific ones on unix-like
 # targets.
 unix_sysv = []
+unstable = []
+bytes_buf = []
 
 #[dependencies]
 #bytes = { version = "0.4.*", optional = true }
