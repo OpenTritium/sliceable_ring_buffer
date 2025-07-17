@@ -272,10 +272,6 @@ unsafe impl<T> Send for SliceRingBuffer<T> where T: Send {}
 // Safe because this doesn't use any kind of interior mutability.
 unsafe impl<T> Sync for SliceRingBuffer<T> where T: Sync {}
 
-/// Implementation detail of the sdeq! macro.
-#[doc(hidden)]
-pub use mem::forget as __mem_forget;
-
 /// Creates a [`SliceRingBuffer`] containing the arguments.
 ///
 /// `sdeq!` allows `SliceRingBuffer`s to be defined with the same syntax as array
@@ -1216,7 +1212,7 @@ impl<T> SliceRingBuffer<T> {
     /// ```
     #[inline]
     #[allow(clippy::needless_pass_by_value)]
-    pub fn drain<R>(&mut self, range: R) -> Drain<T>
+    pub fn drain<R>(&'_ mut self, range: R) -> Drain<'_, T>
     where
         R: ops::RangeBounds<usize>,
     {
@@ -1764,8 +1760,8 @@ impl<T> SliceRingBuffer<T> {
     /// ```
     #[inline]
     pub fn splice<R, I>(
-        &mut self, range: R, replace_with: I,
-    ) -> Splice<I::IntoIter>
+        &'_ mut self, range: R, replace_with: I,
+    ) -> Splice<'_, I::IntoIter>
     where
         R: ops::RangeBounds<usize>,
         I: IntoIterator<Item = T>,
@@ -1836,7 +1832,7 @@ impl<T> SliceRingBuffer<T> {
     /// # }
     /// ```
     #[inline]
-    pub fn drain_filter<F>(&mut self, filter: F) -> DrainFilter<T, F>
+    pub fn drain_filter<F>(&'_ mut self, filter: F) -> DrainFilter<'_, T, F>
     where
         F: FnMut(&mut T) -> bool,
     {
@@ -3833,6 +3829,7 @@ mod tests {
     #[test]
     fn vec_vec_truncate_drop() {
         static mut DROPS: u32 = 0;
+        #[allow(dead_code)]
         struct Elem(i32);
         impl Drop for Elem {
             fn drop(&mut self) {
@@ -3853,6 +3850,7 @@ mod tests {
     #[test]
     fn vec_vec_truncate_front_drop() {
         static mut DROPS: u32 = 0;
+        #[allow(dead_code)]
         struct Elem(i32);
         impl Drop for Elem {
             fn drop(&mut self) {
@@ -5185,6 +5183,7 @@ mod tests {
     fn vecdeque_drop() {
         static mut DROPS: i32 = 0;
         #[derive(Clone)]
+        #[allow(dead_code)]
         struct Elem(i32);
         impl Drop for Elem {
             fn drop(&mut self) {
@@ -5233,6 +5232,7 @@ mod tests {
     #[test]
     fn vecdeque_drop_with_pop() {
         static mut DROPS: i32 = 0;
+        #[allow(dead_code)]
         struct Elem(i32);
         impl Drop for Elem {
             fn drop(&mut self) {
@@ -5283,6 +5283,7 @@ mod tests {
     #[test]
     fn vecdeque_drop_clear() {
         static mut DROPS: i32 = 0;
+        #[allow(dead_code)]
         struct Elem(i32);
         impl Drop for Elem {
             fn drop(&mut self) {
@@ -5819,6 +5820,7 @@ mod tests {
         }
         {
             #[repr(align(32))]
+            #[allow(dead_code)]
             struct Foo(i8);
             let sdeq = SliceRingBuffer::<Foo>::new();
             let v = Vec::<Foo>::new();
@@ -5955,7 +5957,7 @@ mod tests {
     #[test]
     fn sync() {
         fn assert_sync<T: Sync>(_: T) {}
-
+        #[allow(dead_code)]
         struct S(*mut u8);
         unsafe impl Sync for S {}
         let x = SliceRingBuffer::<S>::new();
@@ -5965,7 +5967,7 @@ mod tests {
     #[test]
     fn send() {
         fn assert_send<T: Send>(_: T) {}
-
+        #[allow(dead_code)]
         struct S(*mut u8);
         unsafe impl Send for S {}
         let x = SliceRingBuffer::<S>::new();
