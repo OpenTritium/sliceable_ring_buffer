@@ -776,7 +776,7 @@ impl<T> SliceRingBuffer<T> {
     /// Appends elements to `self` from `other`.
     #[inline]
     unsafe fn append_elements(&mut self, other: *const [T]) {
-        let count = (*other).len();
+        let count = (&(*other)).len();
         // Rust 1.78+: get_unchecked_mut() may panic in debug builds if we don't move the tail
         if count > 0 {
             self.reserve(count);
