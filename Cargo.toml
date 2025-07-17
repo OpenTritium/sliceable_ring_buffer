@@ -27,22 +27,22 @@ features = ["memoryapi", "handleapi", "sysinfoapi", "winbase"]
 default-features = false
 
 [features]
-default = [ "use_std" ]
+default = ["use_std"]
 
 # Enables features that require the standard library
-use_std = [ "libc/use_std" ]
+use_std = ["libc/use_std"]
 # Enables support for the bytes_buf trait. That is,
 # SliceDeque implements the Buf and BufMut traits.
-#bytes_buf = ["bytes", "use_std"]
+bytes_buf = ["bytes", "use_std"]
 # Uses a super-portable but potentially slower System V interprocess
 # shared-memory implementation instead of system-specific ones on unix-like
 # targets.
 unix_sysv = []
 unstable = []
-bytes_buf = []
+cargo-clippy = []
 
-#[dependencies]
-#bytes = { version = "0.4.*", optional = true }
+[dependencies]
+bytes = { version = "0.4.*", optional = true }
 
 [target.'cfg(any(unix, target_os = "dragonfly"))'.dependencies.libc]
 version = "0.2"
