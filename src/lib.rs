@@ -345,7 +345,7 @@ macro_rules! sdeq {
                 let array = [$($x),*];
                 let deq = $crate::SliceRingBuffer::steal_from_slice(&array);
                 #[allow(clippy::forget_copy)]
-                $crate::__mem_forget(array);
+                let _ = array;
                 deq
             }
         }
