@@ -1,304 +1,233 @@
-//! Implements a mirrored memory buffer.
+//! Implements a low-level, mirrored memory buffer.
+//!
+//! A `MirroredBuffer` allocates a virtual memory region that is twice the size
+//! of its physical memory capacity. The second half of the virtual memory is a
+//! mirror of the first half. This layout is particularly useful for implementing
+//! high-performance circular buffers or ring buffers, as it allows for sequential
+//! reading and writing across the buffer's boundary without explicit wrapping logic.
+//!
+//! This is a foundational, `unsafe` building block. It manages raw memory and
+//! does not track initialization, length, or the position of elements. It is intended
+//! to be used within higher-level, safe abstractions.
 
 use super::*;
+use crate::mirrored::utils::mirrored_allocation_unit;
+use core::{
+    mem::{size_of, MaybeUninit, SizedTypeProperties},
+    ptr::NonNull,
+    slice,
+};
 
-/// Number of required memory allocation units to hold `bytes`.
-fn no_required_allocation_units(bytes: usize) -> usize {
-    let ag = allocation_granularity();
-    let r = ((bytes + ag - 1) / ag).max(1);
-    let r = if r % 2 == 0 { r } else { r + 1 };
-    debug_assert!(r * ag >= bytes);
-    debug_assert!(r % 2 == 0);
-    r
-}
+type Size = core::num::niche_types::UsizeNoHighBit;
 
-/// Mirrored memory buffer of length `len`.
+/// A contiguous, mirrored memory buffer for elements of type `T`.
 ///
-/// The buffer elements in range `[0, len/2)` are mirrored into the range
-/// `[len/2, len)`.
-pub struct Buffer<T> {
-    /// Pointer to the first element in the buffer.
+/// See the [module-level documentation](self) for more details.
+///
+/// # Invariants
+///
+/// - If `ptr` is not dangling, `size` must be non-zero.
+/// - The total virtual memory size (`size`) must not exceed `isize::MAX` bytes.
+/// - The allocated memory is laid out such that the virtual address range `[ptr, ptr + size/2)` is mirrored to the
+///   range `[ptr + size/2, ptr + size)`.
+pub struct MirroredBuffer<T> {
     ptr: NonNull<T>,
-    /// Length of the buffer:
-    ///
-    /// * it is NOT always a multiple of 2
-    /// * the elements in range `[0, len/2)` are mirrored into the range
-    /// `[len/2, len)`.
-    len: usize,
+    size: Size, // The total byte length of the underlying virtual memory region. Must not exceed `isize::MAX`.
 }
 
-impl<T> Buffer<T> {
-    /// Number of elements in the buffer.
-    pub fn len(&self) -> usize {
-        self.len
-    }
+impl<T> MirroredBuffer<T> {
+    /// Creates a new, empty `MirroredBuffer` without allocating memory.
+    #[must_use]
+    pub(crate) fn new() -> Self { Self { ptr: NonNull::dangling(), size: unsafe { Size::new_unchecked(0) } } }
 
-    /// Is the buffer empty?
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Pointer to the first element in the buffer.
-    pub unsafe fn ptr(&self) -> *mut T {
-        self.ptr.as_ptr()
-    }
-
-    /// Interprets contents as a slice.
+    /// Returns the number of elements of type `T` that can be stored in the physical region.
     ///
-    /// Warning: Some memory might be uninitialized.
-    pub unsafe fn as_slice(&self) -> &[T] {
-        slice::from_raw_parts(self.ptr.as_ptr(), self.len())
+    /// This is the effective capacity of the buffer for storing unique items.
+    pub(crate) fn capacity(&self) -> usize {
+        let cap = self.physical_size();
+        let t_size = size_of::<T>();
+        debug_assert!(cap % t_size == 0);
+        cap / t_size
     }
 
-    /// Interprets contents as a mut slice.
+    /// Returns the total byte length of the entire virtual memory region.
+    #[inline]
+    pub(crate) fn virtual_size(&self) -> usize { self.size.as_inner() }
+
+    /// Returns the byte length of the physical memory region (which is half of the virtual region).
+    #[inline]
+    pub(crate) fn physical_size(&self) -> usize {
+        let v_size = self.virtual_size();
+        debug_assert!(v_size.is_power_of_two());
+        v_size / 2
+    }
+
+    /// Returns `true` if the buffer has an active memory allocation.
+    #[inline]
+    pub(crate) fn is_not_allocated(&self) -> bool { self.size.as_inner() != 0 }
+
+    /// Allocates a new `MirroredBuffer` with enough space for at least `cap` elements.
     ///
-    /// Warning: Some memory might be uninitialized.
-    pub unsafe fn as_mut_slice(&mut self) -> &mut [T] {
-        slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len())
+    /// The actual allocated size may be larger than requested due to system
+    /// alignment and memory page size requirements.
+    pub(crate) fn with_capacity(cap: usize) -> Self {
+        let virtual_size = mirrored_allocation_unit::<T>(cap);
+        unsafe { Self::uninitialized(virtual_size) }
     }
 
-    /// Interprets content as a slice and access the `i`-th element.
+    /// Creates a `MirroredBuffer` from a pre-calculated virtual memory size.
     ///
-    /// Warning: The memory of the `i`-th element might be uninitialized.
-    pub unsafe fn get(&self, i: usize) -> &T {
-        &self.as_slice()[i]
-    }
-
-    /// Interprets content as a mut slice and access the `i`-th element.
+    /// # Safety
     ///
-    /// Warning: The memory of the `i`-th element might be uninitialized.
-    pub unsafe fn get_mut(&mut self, i: usize) -> &mut T {
-        &mut self.as_mut_slice()[i]
+    /// The caller must ensure that `virtual_size` meets the following criteria:
+    /// - If non-zero, it must be a multiple of the system's `allocation_granularity`.
+    /// - It must be less than or equal to `isize::MAX`.
+    /// - The alignment of `T` must be less than or equal to the `allocation_granularity`.
+    ///
+    /// Violating these conditions can lead to allocation failures or undefined behavior.
+    unsafe fn uninitialized(virtual_size: usize) -> Self {
+        if virtual_size == 0 {
+            return Self::new();
+        }
+        let ag = allocation_granularity();
+        debug_assert!(
+            virtual_size % ag == 0 && virtual_size > 0 && virtual_size <= MAX_USIZE_WITHOUT_HIGHEST_BIT,
+            "virtual_size must be a positive multiple of allocation_granularity() and less than usize::MAX"
+        );
+        // if virtual_size is multiple of allocation_granularity(), so it could be divided by 2
+        let physical_size = virtual_size / 2;
+        debug_assert!(physical_size != 0, "physical_size must be in range (0, MAX_USIZE_WITHOUT_HIGHEST_BIT/ 2)");
+        assert!(
+            align_of::<T>() <= ag,
+            "The alignment requirements of `T` must be smaller than the allocation granularity."
+        );
+        let ptr = allocate_mirrored(virtual_size).expect("Allocation failed");
+        Self { ptr: NonNull::new_unchecked(ptr as *mut T), size: Size::new_unchecked(virtual_size) }
     }
 
-    fn empty_len() -> usize {
-        if mem::size_of::<T>() == 0 {
-            isize::max_value() as usize * 2
-        } else {
+    /// Calculates the length of the virtual slice in terms of number of `T`s.
+    #[inline(always)]
+    fn virtual_slice_len(&self) -> usize {
+        if T::IS_ZST {
             0
+        } else {
+            self.capacity() * 2
         }
     }
 
-    /// Creates a new empty `Buffer`.
-    pub fn new() -> Self {
-        // Here `ptr` is initialized to a magic value but `len == 0`
-        // will ensure that it is never dereferenced in this state.
-        Self {
-            ptr: NonNull::dangling(),
-            len: Self::empty_len(),
-        }
+    /// Returns the buffer's entire virtual memory region as a slice of `MaybeUninit<T>`.
+    #[inline(always)]
+    pub(crate) fn as_uninit_virtaul_slice(&self) -> &[MaybeUninit<T>] {
+        unsafe { slice::from_raw_parts(self.ptr.as_ptr().cast(), self.virtual_slice_len()) }
     }
 
-    /// Creates a new empty `Buffer` from a `ptr` and a `len`.
+    /// Returns the buffer's entire virtual memory region as a mutable slice of `MaybeUninit<T>`.
+    #[inline(always)]
+    pub(crate) fn as_uninit_virtual_slice_mut(&mut self) -> &mut [MaybeUninit<T>] {
+        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr().cast(), self.virtual_slice_len()) }
+    }
+
+    /// Returns a view of a sub-slice of the virtual memory region.
+    ///
+    /// The indices `start` and `len` are relative to the entire virtual region.
     ///
     /// # Panics
     ///
-    /// If `ptr` is null.
-    pub unsafe fn from_raw_parts(ptr: *mut T, len: usize) -> Self {
-        assert!(len % 2 == 0);
-        assert!(!ptr.is_null());
-        if mem::size_of::<T>() == 0 {
-            debug_assert_eq!(len, Self::empty_len());
-        }
-        Self {
-            ptr: NonNull::new_unchecked(ptr),
-            len,
-        }
-    }
-
-    /// Total number of bytes in the buffer.
-    pub fn size_in_bytes(len: usize) -> usize {
-        let v = no_required_allocation_units(len * mem::size_of::<T>())
-            * allocation_granularity();
-        debug_assert!(
-            v >= len * mem::size_of::<T>(),
-            "len: {}, so<T>: {}, v: {}",
-            len,
-            mem::size_of::<T>(),
-            v
+    /// Panics if the range `[start, start + len)` is out of bounds of the virtual slice,
+    /// or if the resulting slice's byte length would exceed `isize::MAX`.
+    #[inline(always)]
+    pub fn uninit_virtual_slice_at(&self, start: usize, len: usize) -> &[MaybeUninit<T>] {
+        assert!(start.checked_add(len) < Some(self.virtual_slice_len()), "slice bounds out of virtual capacity");
+        assert!(
+            len.checked_mul(size_of::<T>()).map_or(false, |bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
+            "slice byte length exceeds isize::MAX"
         );
-        v
+        unsafe { slice::from_raw_parts(self.ptr.add(start).as_ptr().cast(), len) }
     }
 
-    /// Create a mirrored buffer containing `len` `T`s where the first half of
-    /// the buffer is mirrored into the second half.
-    pub fn uninitialized(len: usize) -> Result<Self, AllocError> {
-        // Zero-sized types:
-        if mem::size_of::<T>() == 0 {
-            return Ok(Self {
-                ptr: NonNull::dangling(),
-                len: Self::empty_len(),
-            });
-        }
-        // The alignment requirements of `T` must be smaller than the
-        // allocation granularity.
-        assert!(mem::align_of::<T>() <= allocation_granularity());
-        // To split the buffer in two halfs the number of elements must be a
-        // multiple of two, and greater than zero to be able to mirror
-        // something.
-        if len == 0 {
-            return Ok(Self::new());
-        }
-        assert!(len % 2 == 0);
+    #[inline(always)]
+    pub fn uninit_virtual_slice_mut_at(&mut self, start: usize, len: usize) -> &mut [MaybeUninit<T>] {
+        assert!(start.checked_add(len) < Some(self.virtual_slice_len()), "slice bounds out of virtual capacity");
+        assert!(
+            len.checked_mul(size_of::<T>()).map_or(false, |bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
+            "slice byte length exceeds isize::MAX"
+        );
+        unsafe { slice::from_raw_parts_mut(self.ptr.add(start).as_ptr().cast(), len) }
+    }
 
-        // How much memory we need:
-        let alloc_size = Self::size_in_bytes(len);
-        debug_assert!(alloc_size > 0);
-        debug_assert!(alloc_size % 2 == 0);
-        debug_assert!(alloc_size % allocation_granularity() == 0);
-        debug_assert!(alloc_size >= len * mem::size_of::<T>());
+    #[inline(always)]
+    pub unsafe fn virtual_slice_at_unchecked(&self, start: usize, len: usize) -> &[T] {
+        debug_assert!(start.checked_add(len) < Some(self.virtual_slice_len()), "slice bounds out of capacity");
+        debug_assert!(
+            len.checked_mul(size_of::<T>()).map_or(false, |bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
+            "slice byte length exceeds isize::MAX"
+        );
+        unsafe { slice::from_raw_parts(self.ptr.add(start).as_ptr(), len) }
+    }
 
-        let ptr = allocate_mirrored(alloc_size)?;
-        Ok(Self {
-            ptr: unsafe { NonNull::new_unchecked(ptr as *mut T) },
-            len: alloc_size / mem::size_of::<T>(),
-            // Note: len is not a multiple of two: debug_assert!(len % 2 == 0);
-        })
+    #[inline(always)]
+    pub unsafe fn virtual_slice_mut_at_unchecked(&mut self, start: usize, len: usize) -> &mut [T] {
+        debug_assert!(start.checked_add(len) < Some(self.virtual_slice_len()), "slice bounds out of capacity");
+        debug_assert!(
+            len.checked_mul(size_of::<T>()).map_or(false, |bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
+            "slice byte length exceeds isize::MAX"
+        );
+        unsafe { slice::from_raw_parts_mut(self.ptr.add(start).as_ptr(), len) }
+    }
+
+    /// Returns a raw, constant pointer to the beginning of the buffer.
+    #[inline(always)]
+    pub fn as_ptr(&self) -> *const T { self.ptr.as_ptr() }
+
+    /// Returns a raw, mutable pointer to the beginning of the buffer.
+    #[inline(always)]
+    pub fn as_mut_ptr(&mut self) -> *mut T { self.ptr.as_ptr() }
+
+    /// Returns a reference to an element at `idx` in the virtual region, without checking for initialization.
+    #[inline(always)]
+    pub unsafe fn get_unchecked(&self, idx: usize) -> &MaybeUninit<T> {
+        self.as_uninit_virtaul_slice().get_unchecked(idx)
+    }
+
+    /// Returns a mutable reference to an element at `idx` in the virtual region, without checking for initialization.
+    #[inline(always)]
+    pub unsafe fn get_mut_unchecked(&mut self, idx: usize) -> &mut MaybeUninit<T> {
+        self.as_uninit_virtual_slice_mut().get_unchecked_mut(idx)
+    }
+
+    #[inline(always)]
+    pub fn get(&self, idx: usize) -> Option<&MaybeUninit<T>> { self.as_uninit_virtaul_slice().get(idx) }
+
+    #[inline(always)]
+    pub fn get_mut(&mut self, idx: usize) -> Option<&mut MaybeUninit<T>> {
+        self.as_uninit_virtual_slice_mut().get_mut(idx)
     }
 }
 
-impl<T> Drop for Buffer<T> {
+impl<T> Default for MirroredBuffer<T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<T> Drop for MirroredBuffer<T> {
     fn drop(&mut self) {
-        if mem::size_of::<T>() == 0 {
-            debug_assert_eq!(self.len, Self::empty_len());
+        if T::IS_ZST || !self.is_not_allocated() {
             return;
         }
-        if self.is_empty() {
-            return;
+        unsafe {
+            deallocate_mirrored(self.ptr.as_ptr() as *mut u8, self.virtual_size()).expect("Failed to deallocate memory")
         }
-
-        let buffer_size_in_bytes = Self::size_in_bytes(self.len());
-        let first_half_ptr = self.ptr.as_ptr() as *mut u8;
-        unsafe { deallocate_mirrored(first_half_ptr, buffer_size_in_bytes) };
     }
 }
 
-impl<T> Clone for Buffer<T>
-where
-    T: Clone,
-{
+impl<T> Clone for MirroredBuffer<T> {
     fn clone(&self) -> Self {
         unsafe {
-            let mid = self.len() / 2;
-            let mut c = Self::uninitialized(self.len())
-                .expect("allocating a new mirrored buffer failed");
-            let (from, _) = self.as_slice().split_at(mid);
-            {
-                let (to, _) = c.as_mut_slice().split_at_mut(mid);
-                to[..mid].clone_from_slice(&from[..mid]);
-            }
-            c
+            let mut new_buffer = Self::uninitialized(self.virtual_size());
+            new_buffer.as_mut_ptr().copy_from_nonoverlapping(self.as_ptr(), self.capacity());
+            new_buffer
         }
     }
 }
 
-impl<T> Default for Buffer<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Safe because it is possible to free this from a different thread
-unsafe impl<T> Send for Buffer<T> where T: Send {}
-// Safe because this doesn't use any kind of interior mutability.
-unsafe impl<T> Sync for Buffer<T> where T: Sync {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn is_send_sync<T>() -> bool
-    where
-        T: Send + Sync,
-    {
-        true
-    }
-
-    #[test]
-    fn buffer_send_sync() {
-        assert!(is_send_sync::<Buffer<usize>>());
-    }
-
-    #[test]
-    fn test_new() {
-        let a = Buffer::<u64>::new();
-        assert!(a.is_empty());
-    }
-
-    fn test_alloc(size: usize) {
-        unsafe {
-            let mut a = Buffer::<u64>::uninitialized(size).unwrap();
-            let sz = a.len();
-            assert!(sz >= size);
-            assert_eq!(
-                sz,
-                Buffer::<u64>::size_in_bytes(size) / mem::size_of::<u64>()
-            );
-
-            for i in 0..sz / 2 {
-                *a.get_mut(i) = i as u64;
-            }
-
-            let (first_half_mut, second_half_mut) =
-                a.as_mut_slice().split_at_mut(sz / 2);
-
-            let mut c = 0;
-            for (i, j) in first_half_mut.iter().zip(second_half_mut) {
-                assert_eq!(i, j);
-                c += 1;
-            }
-            assert_eq!(c, sz / 2);
-        }
-    }
-
-    #[test]
-    fn allocations() {
-        let elements_per_alloc_unit =
-            allocation_granularity() / mem::size_of::<u64>();
-        let sizes = [
-            8,
-            elements_per_alloc_unit / 2,
-            elements_per_alloc_unit,
-            elements_per_alloc_unit * 4,
-        ];
-        for &i in &sizes {
-            test_alloc(i);
-        }
-    }
-
-    #[test]
-    fn no_alloc_units_required() {
-        // Up to the allocation unit size we always need two allocation units
-        assert_eq!(
-            no_required_allocation_units(allocation_granularity() / 4),
-            2
-        );
-        assert_eq!(
-            no_required_allocation_units(allocation_granularity() / 2),
-            2
-        );
-        assert_eq!(no_required_allocation_units(allocation_granularity()), 2);
-        // For sizes larger than the allocation units we always round up to the
-        // next even number of allocation units:
-        assert_eq!(
-            no_required_allocation_units(allocation_granularity() + 1),
-            2
-        );
-        assert_eq!(
-            no_required_allocation_units(2 * allocation_granularity()),
-            2
-        );
-        assert_eq!(
-            no_required_allocation_units(3 * allocation_granularity()),
-            4
-        );
-        assert_eq!(
-            no_required_allocation_units(4 * allocation_granularity()),
-            4
-        );
-        assert_eq!(
-            no_required_allocation_units(5 * allocation_granularity()),
-            6
-        );
-    }
-}
+unsafe impl<T> Send for MirroredBuffer<T> where T: Send {}
+unsafe impl<T> Sync for MirroredBuffer<T> where T: Sync {}

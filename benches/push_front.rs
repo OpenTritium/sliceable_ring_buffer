@@ -18,10 +18,9 @@ fn push_front_std_vecdeque(b: &mut test::Bencher) {
 
 #[bench]
 fn push_front_slice_ring_buffer(b: &mut test::Bencher) {
-    let mut deq =
-        slice_ring_buffer::SliceRingBuffer::<u8>::with_capacity(MAX_NO_ITERS);
+    let mut deq = slice_ring_buffer::SliceRingBuffer::<u8>::with_capacity(MAX_NO_ITERS);
     b.iter(|| {
-        deq.push_front(3);
+        deq.try_push_front(3);
         test::black_box(&mut deq);
     });
 }

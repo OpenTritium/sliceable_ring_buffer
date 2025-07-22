@@ -1,5 +1,3 @@
-# This cargo file is used exclusively for development. It includes
-# dev-dependencies which causes 
 [package]
 name = "slice-ring-buffer"
 version = "0.3.4"
@@ -18,35 +16,37 @@ edition = "2018"
 maintenance = { status = "passively-maintained" }
 
 [target.'cfg(all(any(target_os = "macos", target_os = "ios"), not(feature = "unix_sysv")))'.dependencies.mach2]
-version = "0.4.1"
+version = "0.4.3"
 default-features = false
 
-[target.'cfg(target_os = "windows")'.dependencies.winapi]
-version = "0.3.*"
-features = ["memoryapi", "handleapi", "sysinfoapi", "winbase"]
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.61.3"
+features = [
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_Security",
+    "Win32_System_Threading",
+]
+default-features = false
+
+[target.'cfg(target_os = "linux")'.dependencies.libc]
+version = "0.2.174"
 default-features = false
 
 [features]
 default = ["use_std"]
-
-# Enables features that require the standard library
-use_std = ["libc/use_std"]
-# Enables support for the bytes_buf trait. That is,
-# SliceDeque implements the Buf and BufMut traits.
-bytes_buf = ["bytes", "use_std"]
-# Uses a super-portable but potentially slower System V interprocess
-# shared-memory implementation instead of system-specific ones on unix-like
-# targets.
-unix_sysv = []
-unstable = []
-cargo-clippy = []
+use_std = [
+    "libc/use_std",
+    "windows/std",
+    "anyhow/std",
+    "thiserror/std",
+    "num/std",
+]
 
 [dependencies]
-bytes = { version = "0.4.*", optional = true }
-
-[target.'cfg(any(unix, target_os = "dragonfly"))'.dependencies.libc]
-version = "0.2"
-default-features = false
+num = { version = "0.4.3", default-features = false }
+anyhow = { version = "1.0.98", default-features = false }
+thiserror = { version = "2.0.12", default-features = false }
 
 [profile.dev]
 opt-level = 0

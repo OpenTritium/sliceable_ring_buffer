@@ -7,14 +7,9 @@ use super::mem;
 use mach::boolean::boolean_t;
 use mach::kern_return::*;
 use mach::mach_types::mem_entry_name_port_t;
-use mach::memory_object_types::{
-    memory_object_offset_t, memory_object_size_t,
-};
+use mach::memory_object_types::{memory_object_offset_t, memory_object_size_t};
 use mach::traps::mach_task_self;
-use mach::vm::{
-    mach_make_memory_entry_64, mach_vm_allocate, mach_vm_deallocate,
-    mach_vm_remap,
-};
+use mach::vm::{mach_make_memory_entry_64, mach_vm_allocate, mach_vm_deallocate, mach_vm_remap};
 use mach::vm_inherit::VM_INHERIT_NONE;
 use mach::vm_prot::{vm_prot_t, VM_PROT_READ, VM_PROT_WRITE};
 use mach::vm_statistics::{VM_FLAGS_ANYWHERE, VM_FLAGS_FIXED};
@@ -92,8 +87,7 @@ pub fn allocate_mirrored(size: usize) -> Result<*mut u8, AllocError> {
 
         // Get an object handle to the first memory region:
         let mut memory_object_size = half_size as memory_object_size_t;
-        let mut object_handle =
-            mem::MaybeUninit::<mem_entry_name_port_t>::uninit();
+        let mut object_handle = mem::MaybeUninit::<mem_entry_name_port_t>::uninit();
         let parent_handle: mem_entry_name_port_t = 0;
         let r: kern_return_t = mach_make_memory_entry_64(
             task,
@@ -181,8 +175,7 @@ unsafe fn dealloc(ptr: *mut u8, size: usize) -> Result<(), ()> {
     assert!(size % allocation_granularity() == 0);
     assert!(!ptr.is_null());
     let addr = ptr as mach_vm_address_t;
-    let r: kern_return_t =
-        mach_vm_deallocate(mach_task_self(), addr, size as u64);
+    let r: kern_return_t = mach_vm_deallocate(mach_task_self(), addr, size as u64);
     if r != KERN_SUCCESS {
         print_error("dealloc", r);
         return Err(());
