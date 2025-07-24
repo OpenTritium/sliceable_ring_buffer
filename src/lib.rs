@@ -1,34 +1,21 @@
-#![cfg_attr(not(any(feature = "use_std", test)), no_std)]
 #![feature(temporary_niche_types)]
 #![feature(sized_type_properties)]
 #![feature(ptr_as_uninit)]
-
-#[cfg(any(feature = "use_std", test))]
-extern crate core;
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-extern crate mach2 as mach;
-
-#[cfg(unix)]
-extern crate libc;
-
-#[cfg(windows)]
-extern crate windows;
+#![feature(strict_overflow_ops)]
+#![cfg_attr(not(any(feature = "use_std", test)), no_std)]
 
 mod mirrored;
-pub use mirrored::MirroredBuffer;
-use num::Zero;
 
 use core::{
-    cmp, convert, fmt, hash, iter,
-    mem::{self, MaybeUninit},
-    ops::{self, Add, Neg},
-    ptr::{self, NonNull},
-    slice::{self, SlicePattern},
-    str, usize,
+    cmp::Ordering,
+    iter::FromIterator,
+    mem::{replace, MaybeUninit, SizedTypeProperties},
+    ops::{Deref, DerefMut, Neg},
+    ptr::{copy, copy_nonoverlapping, drop_in_place, read, slice_from_raw_parts_mut, write},
 };
-
-use crate::mirrored::MAX_USIZE_WITHOUT_HIGHEST_BIT;
+use mirrored::{mirrored_allocation_unit, MirroredBuffer, MAX_USIZE_WITHOUT_HIGHEST_BIT};
+use num::Zero;
+//todo 处理 zst
 
 // 只需要保证三件事：
 // head 被限制在0..cap，因为前半部分和后半部分是镜像的
@@ -39,9 +26,6 @@ pub struct SliceRingBuffer<T> {
     head: usize, //was jailed in 0..capacity
     len: usize,  //0..=capacity
 }
-
-unsafe impl<T> Send for SliceRingBuffer<T> where T: Send {}
-unsafe impl<T> Sync for SliceRingBuffer<T> where T: Sync {}
 
 impl<T> SliceRingBuffer<T> {
     #[inline]
@@ -76,23 +60,24 @@ impl<T> SliceRingBuffer<T> {
     pub fn as_slice(&self) -> &[T] {
         let head = self.head;
         let len = self.len;
-        let cap = self.capacity();
+        debug_assert!(self.capacity() <= MAX_USIZE_WITHOUT_HIGHEST_BIT);
         debug_assert!(head <= MAX_USIZE_WITHOUT_HIGHEST_BIT);
-        debug_assert!(head < cap);
-        debug_assert!(len <= cap);
+        debug_assert!(head < self.capacity());
+        debug_assert!(len <= self.capacity());
         unsafe { self.buf.virtual_slice_at_unchecked(head, len) }
     }
 
+    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         let head = self.head;
         let len = self.len;
-        let cap = self.capacity();
         debug_assert!(head <= MAX_USIZE_WITHOUT_HIGHEST_BIT);
-        debug_assert!(head < cap);
-        debug_assert!(len <= cap);
+        debug_assert!(head < self.capacity());
+        debug_assert!(len <= self.capacity());
         unsafe { self.buf.virtual_slice_mut_at_unchecked(head, len) }
     }
 
+    #[inline]
     pub unsafe fn uninit_slice(&mut self) -> &mut [MaybeUninit<T>] {
         let cap = self.capacity();
         let len = self.len;
@@ -113,13 +98,14 @@ impl<T> SliceRingBuffer<T> {
     }
 
     // 移动头指针并长度 + 1
+    #[inline]
     pub unsafe fn move_head_unchecked(&mut self, mv: isize) {
         let cap = self.capacity();
         let head = &mut self.head;
         // 安全性：cap 已经在 mirroredbuffer 的成员类型中被保证了在 0..=isize::MAX 范围内
         let cap = cap as isize;
         // 安全性，需要其他入口函数保证
-        debug_assert!(*head <= MAX_USIZE_WITHOUT_HIGHEST_BIT);
+        debug_assert!(*head <= MAX_USIZE_WITHOUT_HIGHEST_BIT && cap > 0);
         // 安全性，经过模运算后不可能超出 cap
         let mut new_head = (*head as isize + mv) % cap;
         if new_head.is_negative() {
@@ -128,7 +114,8 @@ impl<T> SliceRingBuffer<T> {
             new_head += cap;
         }
         *head = new_head as usize;
-        self.len += 1;
+        let new_len = self.len.strict_sub_signed(mv);
+        self.len = new_len;
     }
 
     // 仅仅增加长度
@@ -148,19 +135,19 @@ impl<T> SliceRingBuffer<T> {
         debug_assert!(len >= 0);
         let cap = self.capacity() as isize;
         debug_assert!(len.checked_add(mv) <= Some(cap) && len.checked_add(mv) >= Some(0));
-        self.len += mv as usize;
+        self.len = (len + mv) as usize;
     }
 
     #[inline]
     pub fn append(&mut self, other: &mut Self) {
-        assert!(self.len + other.len <= self.capacity());
+        assert!(self.len.checked_add(other.len) <= Some(self.capacity()));
         unsafe {
             let uninit = self.uninit_slice();
             let src = other.as_slice().as_ptr();
             let dst = uninit.as_mut_ptr() as *mut T;
-            ptr::copy_nonoverlapping(src, dst, other.len);
+            copy_nonoverlapping(src, dst, other.len);
             self.len += other.len;
-            other.len = 0; // 清空 other
+            other.len = 0; // 清空 other，避免旧容器的元素（已经被拷贝到本容器）被析构
         }
     }
 
@@ -177,22 +164,28 @@ impl<T> SliceRingBuffer<T> {
     pub fn back_mut(&mut self) -> Option<&mut T> { self.as_mut_slice().last_mut() }
 
     // 默认行为是拷贝前面的对象，新容量装不下就drop了
+    // 默认不处理0容量
     fn realloc_and_restore_part(&mut self, cap: usize) {
         unsafe {
             let len = self.len;
             let obsolete = len.saturating_sub(cap);
             let reserve = len - obsolete;
             let mut new_buf = MirroredBuffer::<T>::with_capacity(cap);
+            debug_assert!(self.head < self.capacity());
             let old_buf = &mut self.buf;
             let dst = new_buf.as_mut_ptr().cast::<T>();
             let src = old_buf.as_mut_ptr().cast::<T>().add(self.head);
-            ptr::copy_nonoverlapping(src, dst, reserve);
+            // 拷贝要保留的元素
+            copy_nonoverlapping(src, dst, reserve);
+            // 要丢掉的起始位置
             let to_be_drop = src.add(reserve);
+            // 确保要丢掉的元素都能正确析构
             if !obsolete.is_zero() {
-                let d = ptr::slice_from_raw_parts_mut(to_be_drop, obsolete);
-                ptr::drop_in_place(d);
+                let d = slice_from_raw_parts_mut(to_be_drop, obsolete);
+                drop_in_place(d);
             }
-            self.buf = new_buf;
+            let old_buf = replace(&mut self.buf, new_buf);
+            drop(old_buf); // 释放旧的缓冲区
             self.head = 0;
             self.len = reserve;
         }
@@ -213,10 +206,11 @@ impl<T> SliceRingBuffer<T> {
         }
     }
 
+    #[inline]
     pub fn push_front(&mut self, value: T) -> &T {
         // even just a little bit more, it could allocate a huge page
         unsafe {
-            let min_cap = self.len + 1;
+            let min_cap = self.len.strict_add(1);
             if self.capacity() < min_cap {
                 self.realloc_and_restore_part(min_cap);
             }
@@ -238,9 +232,10 @@ impl<T> SliceRingBuffer<T> {
         }
     }
 
+    #[inline]
     pub fn push_back(&mut self, value: T) -> &T {
         unsafe {
-            let min_cap = self.len + 1;
+            let min_cap = self.len.strict_add(1);
             if self.capacity() < min_cap {
                 self.realloc_and_restore_part(min_cap);
             }
@@ -251,25 +246,22 @@ impl<T> SliceRingBuffer<T> {
     #[inline]
     pub fn pop_back(&mut self) -> Option<T> {
         unsafe {
-            let removed = self.last_mut().and_then(|x| Some(ptr::read(x as *mut T)));
+            let removed = self.last_mut().and_then(|x| Some(read(x as *mut T)))?;
             self.move_tail_unchecked(-1);
-            removed
+            Some(removed)
         }
     }
 
     #[inline]
     pub fn pop_front(&mut self) -> Option<T> {
         unsafe {
-            let removed = self.first_mut().and_then(|x| Some(ptr::read(x as *mut T)));
+            let removed = self.first_mut().and_then(|x| Some(read(x as *mut T)))?;
             self.move_head_unchecked(1);
-            self.len -= 1;
-            removed
+            Some(removed)
         }
     }
 
     #[inline]
-    pub fn shrink_to_fit(&mut self) {}
-
     pub fn truncate_back(&mut self, n: usize) {
         let current = self.len;
         if n >= current {
@@ -279,14 +271,31 @@ impl<T> SliceRingBuffer<T> {
         let mv = (current - n) as isize;
         let s = &mut self[n..] as *mut [_];
         unsafe {
-            ptr::drop_in_place(s);
+            drop_in_place(s);
             self.move_tail_unchecked(mv.neg());
         }
         debug_assert_eq!(self.len(), n)
     }
 
     // 默认是从尾部裁切
+    #[inline]
     pub fn truncate(&mut self, n: usize) { self.truncate_back(n); }
+
+    pub fn split_off(&mut self, at: usize) -> Self {
+        assert!(at <= self.len(), "split_off at is out of bounds");
+        let tail_len = self.len() - at;
+        let mut other = Self::with_capacity(tail_len);
+        if tail_len > 0 {
+            let self_slice = self.as_slice();
+            let tail_slice = &self_slice[at..];
+            unsafe {
+                copy_nonoverlapping(tail_slice.as_ptr(), other.as_mut_ptr(), tail_len);
+                other.len = tail_len;
+            }
+        }
+        self.len = at;
+        other
+    }
 
     #[inline]
     pub fn clear(&mut self) { self.truncate_back(0); }
@@ -296,8 +305,9 @@ impl<T> SliceRingBuffer<T> {
         if self.is_empty() {
             return None;
         }
-        let len = self.len();
+        let len = self.len;
         // 若索引指向最后一个元素，直接弹出
+        // is_empty() 保证了 len > 0
         if idx != len - 1 {
             self.swap(idx, len - 1);
         }
@@ -320,12 +330,13 @@ impl<T> SliceRingBuffer<T> {
             let slice = self.as_mut_slice();
 
             // 计算需要移动的元素数量
+            // 上面的两次判断保证了 len 大于 idx
             let count = len - idx;
             let target = slice.as_mut_ptr().add(idx);
             // cap > len > idx
             let dst = target.add(1);
-            ptr::copy(target, dst, count);
-            ptr::write(slice.as_mut_ptr().add(idx), elem);
+            copy(target, dst, count);
+            write(slice.as_mut_ptr().add(idx), elem);
             Some(&*target)
         }
     }
@@ -337,58 +348,85 @@ impl<T> SliceRingBuffer<T> {
             let len = self.len();
             let ptr = self.as_mut_ptr();
             let target = ptr.add(idx);
-            let removed = ptr::read(target);
-            ptr::copy(ptr.add(idx + 1), target, len - idx - 1);
+            let removed = read(target);
+            copy(ptr.add(idx + 1), target, len - 1 - idx);
             self.move_tail_unchecked(-1);
             removed
         }
     }
-}
 
-impl<T> SliceRingBuffer<T>
-where
-    T: Clone,
-{
-    pub fn copy_from_slice(&mut self, other: &[T]) {
-        //用一下min
-        self.clear(); // 清空现有数据
-        assert!(other.len() <= self.capacity(), "source slice length exceeds buffer capacity");
-        self.head = 0; // 重置头指针
-        let uninit_slice = self.buf.as_uninit_virtual_slice_mut();
-        for (i, elem) in other.iter().enumerate() {
-            uninit_slice[i].write(elem.clone());
+    // 可能会保留更多内存，由于分配需要按照分配粒度对齐，所以没有实现 reserve_exact
+    pub fn reserve(&mut self, additional: usize) {
+        let required_cap = self.len().strict_add(additional);
+        let cap = self.capacity();
+        if cap >= required_cap {
+            return;
         }
-        self.len = other.len();
+        let new_cap = required_cap.max(cap.saturating_mul(2));
+        self.realloc_and_restore_part(new_cap);
     }
 
-    pub fn extend_from_slice(&mut self, other: &[T]) {}
-
-    #[inline]
-    pub fn resize(&mut self, new_len: usize, value: T) {}
-}
-
-impl<T> Drop for SliceRingBuffer<T> {
-    #[inline]
-    fn drop(&mut self) {
-        // In Rust, if Drop::drop panics, the value must be leaked,
-        // therefore we don't need to make sure that we handle that case
-        // here:
-        unsafe {
-            // use drop for [T]
-            ptr::drop_in_place(self);
+    // 缩到指定的容量，如果小于当前长度则 panic
+    pub fn shrink_to(&mut self, min_cap: usize) {
+        if T::IS_ZST || self.buf.is_not_allocated() {
+            return;
         }
-        // Buffer handles deallocation
+        let len = self.len();
+        assert!(min_cap < len, "min_capacity is less than current length");
+        if min_cap == len {
+            return;
+        }
+        let ideal_virtual_size = mirrored_allocation_unit::<T>(min_cap);
+        if ideal_virtual_size < self.buf.virtual_size() {
+            self.realloc_and_restore_part(min_cap);
+        }
+    }
+
+    #[inline]
+    pub fn shrink_to_fit(&mut self) {
+        if T::IS_ZST || self.buf.is_not_allocated() {
+            return;
+        }
+        let len = self.len();
+        let ideal_virtual_size = mirrored_allocation_unit::<T>(len);
+        if ideal_virtual_size >= self.buf.virtual_size() {
+            return;
+        }
+        // ideal_virtual_size 这里不太可能为0，因为 is_not_allocated 保证了 len > 0，
+        // mirrored_allocation_unit 也会返回大于0的值
+        self.realloc_and_restore_part(ideal_virtual_size);
+    }
+
+    pub fn into_iter(self) -> IntoIter<T> { IntoIter { inner: self } }
+
+    pub fn rotate_left(&mut self, mid: usize) {
+        assert!(mid <= self.len(), "rotate_left mid is out of bounds");
+        let cap = self.capacity();
+        assert!(cap != 0, "rotate_left called on an empty buffer");
+        if mid == 0 {
+            return;
+        }
+        self.head = (self.head + mid) % cap;
+    }
+
+    pub fn rotate_right(&mut self, k: usize) {
+        assert!(k <= self.len(), "rotate_right k is out of bounds");
+        if k == 0 {
+            return;
+        }
+        let len = self.len();
+        self.rotate_left(len - k);
     }
 }
 
-impl<T> ops::Deref for SliceRingBuffer<T> {
+impl<T> Deref for SliceRingBuffer<T> {
     type Target = [T];
 
     #[inline]
     fn deref(&self) -> &Self::Target { self.as_slice() }
 }
 
-impl<T> ops::DerefMut for SliceRingBuffer<T> {
+impl<T> DerefMut for SliceRingBuffer<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target { self.as_mut_slice() }
 }
@@ -398,10 +436,82 @@ impl<T> Default for SliceRingBuffer<T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<T> convert::AsRef<[T]> for SliceRingBuffer<T> {
+impl<T> AsRef<[T]> for SliceRingBuffer<T> {
     fn as_ref(&self) -> &[T] { &*self }
 }
 
-impl<T> convert::AsMut<[T]> for SliceRingBuffer<T> {
+impl<T> AsMut<[T]> for SliceRingBuffer<T> {
     fn as_mut(&mut self) -> &mut [T] { &mut *self }
 }
+
+impl<T: PartialEq> PartialEq for SliceRingBuffer<T> {
+    fn eq(&self, other: &Self) -> bool { self.as_slice() == other.as_slice() }
+}
+
+impl<T: Eq> Eq for SliceRingBuffer<T> {}
+
+impl<T: PartialOrd> PartialOrd for SliceRingBuffer<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { self.as_slice().partial_cmp(other.as_slice()) }
+}
+
+impl<T: Ord> Ord for SliceRingBuffer<T> {
+    fn cmp(&self, other: &Self) -> Ordering { self.as_slice().cmp(other.as_slice()) }
+}
+
+pub struct IntoIter<T> {
+    inner: SliceRingBuffer<T>,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> { self.inner.pop_front() }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.inner.len();
+        (len, Some(len))
+    }
+}
+
+impl<T> From<Vec<T>> for SliceRingBuffer<T> {
+    fn from(vec: Vec<T>) -> Self { Self::from_iter(vec.into_iter()) }
+}
+
+impl<'a, T: Clone> From<&'a [T]> for SliceRingBuffer<T> {
+    fn from(slice: &'a [T]) -> Self {
+        let len = slice.len();
+        let mut rb = SliceRingBuffer::with_capacity(len);
+        for item in slice {
+            unsafe {
+                rb.try_push_back(item.clone()).unwrap_unchecked();
+            }
+        }
+        rb
+    }
+}
+
+impl<T> FromIterator<T> for SliceRingBuffer<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let iterator = iter.into_iter();
+        let (lower, _) = iterator.size_hint();
+        let mut rb = SliceRingBuffer::with_capacity(lower);
+        rb.extend(iterator);
+        rb
+    }
+}
+
+impl<T> Extend<T> for SliceRingBuffer<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        let iterator = iter.into_iter();
+        let (lower, _) = iterator.size_hint();
+        self.reserve(lower);
+        for item in iterator {
+            self.push_back(item);
+        }
+    }
+}
+
+unsafe impl<T> Send for SliceRingBuffer<T> where T: Send {}
+unsafe impl<T> Sync for SliceRingBuffer<T> where T: Sync {}

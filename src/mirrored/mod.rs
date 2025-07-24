@@ -19,5 +19,6 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::*;
 
-pub use buffer::MirroredBuffer;
-pub use utils::MAX_USIZE_WITHOUT_HIGHEST_BIT;
+pub(crate) use buffer::MirroredBuffer;
+pub(crate) use utils::MAX_USIZE_WITHOUT_HIGHEST_BIT;
+pub(crate) use utils::mirrored_allocation_unit;

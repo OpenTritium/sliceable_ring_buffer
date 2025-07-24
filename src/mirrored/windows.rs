@@ -11,7 +11,7 @@ use windows::{
         Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
         System::{
             Memory::{
-                CreateFileMappingW, MapViewOfFile3, UnmapViewOfFile, UnmapViewOfFile2, VirtualAlloc2, VirtualFree,
+                CreateFileMappingW, MapViewOfFile3, UnmapViewOfFile2, VirtualAlloc2, VirtualFree,
                 MEMORY_MAPPED_VIEW_ADDRESS, MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER,
                 MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, MEM_UNMAP_NONE, PAGE_NOACCESS, PAGE_READWRITE, SEC_COMMIT,
                 VIRTUAL_FREE_TYPE,
@@ -21,6 +21,8 @@ use windows::{
         },
     },
 };
+
+use crate::mirrored::MAX_USIZE_WITHOUT_HIGHEST_BIT;
 
 /// Retrieves the system's memory allocation granularity, caching the value for performance.
 ///
@@ -88,7 +90,7 @@ pub(crate) fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     // if virtual_size is multiple of allocation_granularity(), so it could be divided by 2
     let physical_size = virtual_size / 2;
     debug_assert!(
-        physical_size != 0 && physical_size <= isize::MAX as usize,
+        physical_size != 0 && physical_size <= MAX_USIZE_WITHOUT_HIGHEST_BIT,
         "physical_size must be in range (0, isize::MAX)"
     );
     let maximum_size_low = physical_size as u32;
@@ -118,19 +120,19 @@ pub(crate) fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
         }
         // free two times to divide the memory region into two halves
         let low_half_addr = placeholder;
+        let high_half_addr = low_half_addr.offset(physical_size as isize);
         let partition = |addr| {
             if VirtualFree(addr, physical_size, VIRTUAL_FREE_TYPE(MEM_RELEASE.0 | MEM_PRESERVE_PLACEHOLDER.0)).is_err()
             {
                 // don't care about the result of resource cleanup, ensure other resources are cleaned up
                 let _ = VirtualFree(placeholder, 0, MEM_RELEASE);
                 let _ = CloseHandle(file_mapping);
-                bail!("VirtualFree failed");
+                bail!("Parition failed");
             }
             Ok(())
         };
-        partition(low_half_addr)?;
-        let high_half_addr = low_half_addr.offset(physical_size as isize);
-        partition(high_half_addr)?;
+        // partition(high_half_addr)?;
+        partition(low_half_addr)?; // you just free any half, another half will be split automatically
         let clean_view = |view| {
             let _ = UnmapViewOfFile2(current_process, view, MEM_UNMAP_NONE);
             let _ = VirtualFree(placeholder, 0, MEM_RELEASE);
@@ -180,6 +182,7 @@ pub(crate) fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
 /// Returns an `Err` if any underlying OS deallocation step fails. The function
 /// attempts all cleanup steps regardless of intermediate failures.
 pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
+    let ptr = ptr as *mut c_void;
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
         virtual_size % allocation_granularity() == 0 && virtual_size > 0,
@@ -191,21 +194,95 @@ pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> A
         physical_size != 0 && physical_size <= isize::MAX as usize,
         "physical_size must be in range (0, isize::MAX)"
     );
-    let into_view = |p| MEMORY_MAPPED_VIEW_ADDRESS { Value: p as *mut c_void };
-    let low_addr = into_view(ptr);
-    let unmap_low_result = UnmapViewOfFile(low_addr);
-    let high_addr = into_view(ptr.offset(physical_size as isize));
-    let unmap_high_result = UnmapViewOfFile(high_addr);
-    // when you use `MEM_RELEASE` to release a memory region, the `dwsize` parameter must be zero
-    let free_result = VirtualFree(ptr as *mut c_void, 0, MEM_RELEASE);
-    if unmap_low_result.is_err() || unmap_high_result.is_err() || free_result.is_err() {
+    let current_process = GetCurrentProcess();
+    let low_ptr = ptr;
+    let high_ptr = ptr.offset(physical_size as isize);
+    let into_view = |p| MEMORY_MAPPED_VIEW_ADDRESS { Value: p };
+    let unmap_low_result = UnmapViewOfFile2(current_process, into_view(low_ptr), MEM_UNMAP_NONE);
+    let unmap_high_result = UnmapViewOfFile2(current_process, into_view(high_ptr), MEM_UNMAP_NONE);
+    // no need to free the placeholder, it already has been freed by the unmap operation
+    if unmap_low_result.is_err() || unmap_high_result.is_err() {
         bail!(
-            "Failed to fully deallocate mirrored memory. Status: [Unmap Low: {:?}, Unmap High: {:?}, VirtualFree: \
-             {:?}]",
+            "Failed to fully deallocate mirrored memory. Status: [Unmap Low: {:?}, Unmap High: {:?}]",
             unmap_low_result,
             unmap_high_result,
-            free_result
         )
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::slice;
+
+    #[test]
+    fn test_happy_path_allocation() {
+        let virtual_size = allocation_granularity() * 16;
+        let ptr = allocate_mirrored(virtual_size).expect("Failed to allocate mirrored memory");
+        assert!(!ptr.is_null(), "Allocated pointer should not be null");
+        unsafe {
+            deallocate_mirrored(ptr, virtual_size).expect("Failed to deallocate mirrored memory");
+        }
+    }
+
+    #[test]
+    fn test_mirrored_write_read() {
+        let virtual_size = allocation_granularity() * 4;
+        let physical_size = virtual_size / 2;
+        let ptr = allocate_mirrored(virtual_size).expect("Allocation failed");
+        unsafe {
+            let full_slice = slice::from_raw_parts_mut(ptr, virtual_size);
+            let test_data = (0..physical_size).map(|i| (i % 256) as u8).collect::<Vec<u8>>();
+            full_slice[..physical_size].copy_from_slice(&test_data);
+            let second_half = &full_slice[physical_size..];
+            assert_eq!(
+                second_half,
+                test_data.as_slice(),
+                "Data written to the first half was not mirrored to the second half"
+            );
+            full_slice.fill(0);
+            assert!(full_slice.iter().all(|&b| b == 0));
+            full_slice[physical_size..].copy_from_slice(&test_data);
+            let first_half = &full_slice[..physical_size];
+            assert_eq!(
+                first_half,
+                test_data.as_slice(),
+                "Data written to the second half was not mirrored to the first half"
+            );
+            deallocate_mirrored(ptr, virtual_size).expect("Deallocation failed");
+        }
+    }
+
+    #[test]
+    fn test_write_across_boundary() {
+        let virtual_size = allocation_granularity() * 8;
+        let physical_size = virtual_size / 2;
+        let ptr = allocate_mirrored(virtual_size).expect("Allocation failed");
+        unsafe {
+            let full_slice = slice::from_raw_parts_mut(ptr, virtual_size);
+            let test_data = b"hello_world";
+            let data_len = test_data.len();
+            let start_pos = physical_size - 5;
+            let target_slice = &mut full_slice[start_pos..start_pos + data_len];
+            target_slice.copy_from_slice(test_data);
+            let written_slice = slice::from_raw_parts(ptr.add(start_pos), data_len);
+            assert_eq!(written_slice, test_data);
+            assert_eq!(&full_slice[0..data_len - 5], &test_data[5..]);
+            deallocate_mirrored(ptr, virtual_size).expect("Deallocation failed");
+        }
+    }
+
+    #[test]
+    fn test_minimum_valid_size() {
+        let min_virtual_size = allocation_granularity() * 2;
+        let ptr = allocate_mirrored(min_virtual_size).expect("Allocation with minimum valid size failed");
+        assert!(!ptr.is_null());
+        unsafe {
+            let p = ptr.as_mut().unwrap();
+            *p = 123;
+            assert_eq!(*ptr.add(min_virtual_size / 2), 123);
+            deallocate_mirrored(ptr, min_virtual_size).expect("Deallocation failed");
+        }
+    }
 }
