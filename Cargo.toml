@@ -1,22 +1,21 @@
 [package]
 name = "slice-ring-buffer"
 version = "0.3.4"
-authors = ["Linus Probert <linus.probert@gmail.com>"]
+authors = ["OpenTritium <tritium404@hotmail.com>"]
 description = "A double-ended queue that Deref's into a slice."
 documentation = "https://docs.rs/crate/slice-ring-buffer/"
-homepage = "https://github.com/liquidityc/slice_ring_buffer"
-repository = "https://github.com/liquidityc/slice_ring_buffer"
+repository = "https://github.com/OpenTritium/slice_ring_buffer"
 readme = "README.md"
 keywords = ["collection", "deque", "ring", "circular", "buffer"]
 categories = ["data-structures", "no-std"]
-license = "MIT/Apache-2.0"
-edition = "2018"
+license = "MIT OR Apache-2.0"
+edition = "2024"
 
 [badges]
 maintenance = { status = "passively-maintained" }
 
 [target.'cfg(all(any(target_os = "macos", target_os = "ios"), not(feature = "unix_sysv")))'.dependencies.mach2]
-version = "0.4.3"
+version = "0.5.0"
 default-features = false
 
 [target.'cfg(target_os = "windows")'.dependencies.windows]
@@ -47,20 +46,3 @@ use_std = [
 num = { version = "0.4.3", default-features = false }
 anyhow = { version = "1.0.98", default-features = false }
 thiserror = { version = "2.0.12", default-features = false }
-
-[profile.dev]
-opt-level = 0
-debug = true
-lto = false
-debug-assertions = true
-codegen-units = 4
-incremental = true
-panic = 'unwind'
-
-[profile.bench]
-opt-level = 3
-debug = false
-rpath = false
-lto = true
-debug-assertions = false
-codegen-units = 1

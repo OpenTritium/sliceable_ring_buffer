@@ -13,7 +13,7 @@
 use super::*;
 use crate::mirrored::utils::mirrored_allocation_unit;
 use core::{
-    mem::{size_of, MaybeUninit, SizedTypeProperties},
+    mem::{MaybeUninit, SizedTypeProperties, size_of},
     ptr::NonNull,
     slice,
 };
@@ -196,7 +196,7 @@ impl<T> MirroredBuffer<T> {
 
     /// Returns a reference to an element at `idx` in the virtual region, without checking for initialization.
     #[inline(always)]
-    pub(crate) unsafe fn get_unchecked(&self, idx: usize) -> &MaybeUninit<T> {
+    pub(crate) unsafe fn get_uninit(&self, idx: usize) -> &MaybeUninit<T> {
         self.as_uninit_virtaul_slice().get_unchecked(idx)
     }
 
@@ -313,12 +313,12 @@ mod tests {
             *buf.get_mut_unchecked(2).as_mut_ptr() = val2;
 
             // Read from the first half
-            assert_eq!(*buf.get_unchecked(0).assume_init_ref(), val1);
-            assert_eq!(*buf.get_unchecked(2).assume_init_ref(), val2);
+            assert_eq!(*buf.get_uninit(0).assume_init_ref(), val1);
+            assert_eq!(*buf.get_uninit(2).assume_init_ref(), val2);
 
             // Read from the mirrored second half
-            assert_eq!(*buf.get_unchecked(capacity).assume_init_ref(), val1);
-            assert_eq!(*buf.get_unchecked(2 + capacity).assume_init_ref(), val2);
+            assert_eq!(*buf.get_uninit(capacity).assume_init_ref(), val1);
+            assert_eq!(*buf.get_uninit(2 + capacity).assume_init_ref(), val2);
         }
     }
 
@@ -337,12 +337,12 @@ mod tests {
             buf.as_uninit_virtual_slice_mut()[capacity + 5].as_mut_ptr().write(val2);
 
             // Read from the second half
-            assert_eq!(*buf.get_unchecked(capacity + 1).assume_init_ref(), val1);
-            assert_eq!(*buf.get_unchecked(capacity + 5).assume_init_ref(), val2);
+            assert_eq!(*buf.get_uninit(capacity + 1).assume_init_ref(), val1);
+            assert_eq!(*buf.get_uninit(capacity + 5).assume_init_ref(), val2);
 
             // Read from the first (physical) half
-            assert_eq!(*buf.get_unchecked(1).assume_init_ref(), val1);
-            assert_eq!(*buf.get_unchecked(5).assume_init_ref(), val2);
+            assert_eq!(*buf.get_uninit(1).assume_init_ref(), val1);
+            assert_eq!(*buf.get_uninit(5).assume_init_ref(), val2);
         }
     }
 
@@ -406,9 +406,9 @@ mod tests {
         }
 
         unsafe {
-            assert_eq!(*buf.get_unchecked(1).assume_init_ref(), -100);
+            assert_eq!(*buf.get_uninit(1).assume_init_ref(), -100);
             // Verify mirrored value
-            assert_eq!(*buf.get_unchecked(1 + capacity).assume_init_ref(), -100);
+            assert_eq!(*buf.get_uninit(1 + capacity).assume_init_ref(), -100);
         }
     }
 

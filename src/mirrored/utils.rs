@@ -1,5 +1,5 @@
 use crate::mirrored::allocation_granularity;
-use core::mem::{size_of, SizedTypeProperties};
+use core::mem::{SizedTypeProperties, size_of};
 use num::Integer;
 
 /// Calculates the byte size of a mirrored allocation, typically used for implementing a ring buffer.
@@ -7,6 +7,9 @@ use num::Integer;
 /// common multiple of `sizeof::<T>()` and the system's allocation granularity.
 pub(crate) fn mirrored_allocation_unit<T>(count: usize) -> usize {
     if T::IS_ZST {
+        return 0;
+    }
+    if count == 0 {
         return 0;
     }
     let ag = allocation_granularity();

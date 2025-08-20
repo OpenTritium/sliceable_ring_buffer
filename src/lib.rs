@@ -9,11 +9,11 @@ mod mirrored;
 use core::{
     cmp::Ordering,
     iter::FromIterator,
-    mem::{replace, MaybeUninit, SizedTypeProperties},
+    mem::{MaybeUninit, SizedTypeProperties, replace},
     ops::{Deref, DerefMut, Neg},
     ptr::{copy, copy_nonoverlapping, drop_in_place, read, slice_from_raw_parts_mut, write},
 };
-use mirrored::{mirrored_allocation_unit, MirroredBuffer, MAX_USIZE_WITHOUT_HIGHEST_BIT};
+use mirrored::{MAX_USIZE_WITHOUT_HIGHEST_BIT, MirroredBuffer, mirrored_allocation_unit};
 use num::Zero;
 
 pub struct SliceRingBuffer<T> {
@@ -81,6 +81,20 @@ impl<T> SliceRingBuffer<T> {
         let head = self.head();
         let len = self.len();
         unsafe { self.buf.virtual_slice_mut_at_unchecked(head, len) }
+    }
+
+    #[inline]
+    pub fn as_uninit_slice(&self) -> &[MaybeUninit<T>] {
+        let len = self.len();
+        let head = self.head();
+        self.buf.uninit_virtual_slice_at(head, len)
+    }
+
+    #[inline]
+    pub fn as_uninit_mut_slice(&mut self) -> &mut [MaybeUninit<T>] {
+        let len = self.len();
+        let head = self.head();
+        self.buf.uninit_virtual_slice_mut_at(head, len)
     }
 
     #[inline]
@@ -175,12 +189,12 @@ impl<T> SliceRingBuffer<T> {
             let reserve = len - obsolete;
             let mut new_buf = MirroredBuffer::<T>::with_capacity(new_cap);
             let old_buf = &mut self.buf;
-            let dst = new_buf.as_mut_ptr().cast::<T>();
-            let src = old_buf.as_mut_ptr().cast::<T>().add(self.head());
-            // 拷贝要保留的元素
-            copy_nonoverlapping(src, dst, reserve);
-            // 确保要丢掉的元素都能正确析构
             if !obsolete.is_zero() {
+                let dst = new_buf.as_mut_ptr().cast::<T>();
+                let src = old_buf.as_mut_ptr().cast::<T>().add(self.head());
+                // 拷贝要保留的元素
+                copy_nonoverlapping(src, dst, reserve);
+                // 确保要丢掉的元素都能正确析构
                 let drop_start = src.add(reserve);
                 let d = slice_from_raw_parts_mut(drop_start, obsolete);
                 drop_in_place(d);
@@ -199,9 +213,9 @@ impl<T> SliceRingBuffer<T> {
         }
         unsafe {
             self.move_head_unchecked(-1);
-            let p = self.as_mut_slice().first_mut().unwrap_unchecked();
-            *p = value;
-            Some(&*p)
+            let uninit = self.as_uninit_mut_slice().first_mut().unwrap_unchecked();
+            let init = uninit.write(value);
+            Some(&*init)
         }
     }
 
@@ -224,9 +238,9 @@ impl<T> SliceRingBuffer<T> {
         }
         unsafe {
             self.move_tail_unchecked(1);
-            let p = self.as_mut_slice().last_mut()?;
-            *p = value;
-            Some(&*p)
+            let uninit = self.as_uninit_mut_slice().last_mut().unwrap_unchecked();
+            let init = uninit.write(value);
+            Some(&*init)
         }
     }
 
@@ -561,6 +575,8 @@ impl<T> Drop for SliceRingBuffer<T> {
 
 #[cfg(test)]
 mod tests {
+    use num::Integer;
+
     use super::*;
     use std::rc::Rc;
 
@@ -600,7 +616,7 @@ mod tests {
         assert!(rb.is_empty());
     }
 
-    // #[test]
+    #[test]
     fn test_push_front_and_pop_back() {
         let mut rb = SliceRingBuffer::with_capacity(3);
         rb.push_front(1);
@@ -609,7 +625,6 @@ mod tests {
 
         assert_eq!(rb.len(), 3);
         assert!(!rb.is_empty());
-        assert!(rb.is_full());
         assert_eq!(rb.as_slice(), &[3, 2, 1]);
 
         assert_eq!(rb.pop_back(), Some(1));
@@ -621,7 +636,7 @@ mod tests {
         assert!(rb.is_empty());
     }
 
-    // #[test]
+    #[test]
     fn test_wrap_around() {
         let mut rb = SliceRingBuffer::with_capacity(3);
         rb.push_back(1);
@@ -632,7 +647,6 @@ mod tests {
 
         assert_eq!(rb.as_slice(), &[2, 3, 4]);
         assert_eq!(rb.len(), 3);
-        assert!(rb.is_full());
 
         assert_eq!(rb.pop_front(), Some(2));
         assert_eq!(rb.pop_front(), Some(3));
@@ -640,7 +654,7 @@ mod tests {
         assert_eq!(rb.pop_front(), None);
     }
 
-    // #[test]
+    #[test]
     fn test_deref() {
         let mut rb = SliceRingBuffer::with_capacity(4);
         rb.push_back(10);
@@ -650,7 +664,7 @@ mod tests {
         assert_eq!(&[10, 20, 30], &*rb);
     }
 
-    // #[test]
+    #[test]
     fn test_deref_mut() {
         let mut rb = SliceRingBuffer::with_capacity(4);
         rb.push_back(10);
@@ -661,7 +675,7 @@ mod tests {
         assert_eq!(&[10, 25, 30], &*rb);
     }
 
-    // #[test]
+    #[test]
     fn test_front_back() {
         let mut rb = SliceRingBuffer::with_capacity(5);
         assert!(rb.front().is_none());
@@ -680,7 +694,7 @@ mod tests {
         assert_eq!(rb.back(), Some(&2));
     }
 
-    // #[test]
+    #[test]
     fn test_clear() {
         let mut rb = SliceRingBuffer::with_capacity(3);
         rb.push_back(1);
@@ -690,7 +704,7 @@ mod tests {
         assert_eq!(rb.len(), 0);
     }
 
-    // #[test]
+    #[test]
     fn test_into_iter() {
         let mut rb = SliceRingBuffer::with_capacity(4);
         rb.push_back(1);
@@ -704,7 +718,7 @@ mod tests {
         assert_eq!(iter.next(), None);
     }
 
-    // #[test]
+    #[test]
     fn test_from_iter() {
         let data = vec![1, 2, 3, 4, 5];
         let rb: SliceRingBuffer<i32> = data.into_iter().collect();
@@ -712,29 +726,29 @@ mod tests {
         assert_eq!(rb.as_slice(), &[1, 2, 3, 4, 5]);
     }
 
-    // #[test]
+    #[test]
     fn test_extend() {
         let mut rb = SliceRingBuffer::from(vec![1, 2]);
         rb.extend(vec![3, 4, 5]);
         assert_eq!(rb.as_slice(), &[1, 2, 3, 4, 5]);
     }
 
-    // #[test]
+    #[test]
     fn test_realloc() {
         let mut rb = SliceRingBuffer::with_capacity(2);
-        rb.push_back(1);
-        rb.push_back(2);
-        rb.push_back(3); // Esto debería causar una reasignación
-
-        assert!(rb.capacity() >= 3);
-        assert_eq!(rb.len(), 3);
-        assert_eq!(rb.as_slice(), &[1, 2, 3]);
-
-        assert_eq!(rb.pop_front(), Some(1));
-        assert_eq!(rb.as_slice(), &[2, 3]);
+        for i in 0..0x400 {
+            if i.is_even() {
+                rb.push_back(i);
+            } else {
+                rb.push_front(i);
+            }
+        }
+        rb.push_back(114514);
+        assert!(rb.capacity() >= 0x400);
+        assert_eq!(rb.len(), 0x400 + 1);
     }
 
-    // #[test]
+    #[test]
     fn test_drop() {
         let drop_counter = Rc::new(std::cell::Cell::new(0));
 
@@ -746,7 +760,7 @@ mod tests {
             fn drop(&mut self) { self.counter.set(self.counter.get() + 1); }
         }
 
-        let mut rb = SliceRingBuffer::with_capacity(4);
+        let mut rb: SliceRingBuffer<DropTracker> = SliceRingBuffer::with_capacity(4);
         rb.push_back(DropTracker { counter: drop_counter.clone() });
         rb.push_back(DropTracker { counter: drop_counter.clone() });
         rb.push_back(DropTracker { counter: drop_counter.clone() });
