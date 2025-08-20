@@ -45,10 +45,10 @@ impl<T> MirroredBuffer<T> {
     ///
     /// This is the effective capacity of the buffer for storing unique items.
     pub(crate) fn capacity(&self) -> usize {
-        let cap = self.physical_size();
+        let total_size = self.physical_size();
         let t_size = size_of::<T>();
-        debug_assert!(cap % t_size == 0);
-        cap / t_size
+        debug_assert!(total_size.is_multiple_of(t_size));
+        total_size / t_size
     }
 
     /// Returns the total byte length of the entire virtual memory region.
@@ -65,7 +65,7 @@ impl<T> MirroredBuffer<T> {
 
     /// Returns `true` if the buffer has an active memory allocation.
     #[inline]
-    pub(crate) fn is_not_allocated(&self) -> bool { self.size.as_inner() != 0 }
+    pub(crate) fn is_allocated(&self) -> bool { self.size.as_inner() != 0 }
 
     /// Allocates a new `MirroredBuffer` with enough space for at least `cap` elements.
     ///
@@ -92,7 +92,7 @@ impl<T> MirroredBuffer<T> {
         }
         let ag = allocation_granularity();
         debug_assert!(
-            virtual_size % ag == 0 && virtual_size > 0 && virtual_size <= MAX_USIZE_WITHOUT_HIGHEST_BIT,
+            virtual_size.is_multiple_of(ag) && virtual_size > 0 && virtual_size <= MAX_USIZE_WITHOUT_HIGHEST_BIT,
             "virtual_size must be a positive multiple of allocation_granularity() and less than usize::MAX"
         );
         // if virtual_size is multiple of allocation_granularity(), so it could be divided by 2
@@ -134,7 +134,7 @@ impl<T> MirroredBuffer<T> {
     pub(crate) fn uninit_virtual_slice_at(&self, start: usize, len: usize) -> &[MaybeUninit<T>] {
         assert!(start.checked_add(len) <= Some(self.virtual_slice_len()), "slice bounds out of virtual capacity");
         assert!(
-            len.checked_mul(size_of::<T>()).map_or(false, |bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
+            len.checked_mul(size_of::<T>()).is_some_and(|bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
             "slice byte length exceeds isize::MAX"
         );
         unsafe { slice::from_raw_parts(self.ptr.add(start).as_ptr().cast(), len) }
@@ -152,7 +152,7 @@ impl<T> MirroredBuffer<T> {
     pub(crate) fn uninit_virtual_slice_mut_at(&mut self, start: usize, len: usize) -> &mut [MaybeUninit<T>] {
         assert!(start.checked_add(len) <= Some(self.virtual_slice_len()), "slice bounds out of virtual capacity");
         assert!(
-            len.checked_mul(size_of::<T>()).map_or(false, |bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
+            len.checked_mul(size_of::<T>()).is_some_and(|bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
             "slice byte length exceeds isize::MAX"
         );
         unsafe { slice::from_raw_parts_mut(self.ptr.add(start).as_ptr().cast(), len) }
@@ -161,9 +161,12 @@ impl<T> MirroredBuffer<T> {
     /// Returns a view of a sub-slice of the virtual memory region, without checking bounds.
     #[inline(always)]
     pub(crate) unsafe fn virtual_slice_at_unchecked(&self, start: usize, len: usize) -> &[T] {
-        debug_assert!(start.checked_add(len) < Some(self.virtual_slice_len()), "slice bounds out of capacity");
         debug_assert!(
-            len.checked_mul(size_of::<T>()).map_or(false, |bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
+            (start.checked_add(len) < Some(self.virtual_slice_len())) || start.checked_add(len) == Some(0),
+            "slice bounds out of capacity"
+        );
+        debug_assert!(
+            len.checked_mul(size_of::<T>()).is_some_and(|bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
             "slice byte length exceeds isize::MAX"
         );
         unsafe { slice::from_raw_parts(self.ptr.add(start).as_ptr(), len) }
@@ -172,9 +175,12 @@ impl<T> MirroredBuffer<T> {
     /// Returns a view of a sub-slice of the virtual memory region, without checking bounds.
     #[inline(always)]
     pub(crate) unsafe fn virtual_slice_mut_at_unchecked(&mut self, start: usize, len: usize) -> &mut [T] {
-        debug_assert!(start.checked_add(len) < Some(self.virtual_slice_len()), "slice bounds out of capacity");
         debug_assert!(
-            len.checked_mul(size_of::<T>()).map_or(false, |bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
+            (start.checked_add(len) < Some(self.virtual_slice_len()) || start.checked_add(len) == Some(0)),
+            "slice bounds out of capacity"
+        );
+        debug_assert!(
+            len.checked_mul(size_of::<T>()).is_some_and(|bytes| bytes <= MAX_USIZE_WITHOUT_HIGHEST_BIT),
             "slice byte length exceeds isize::MAX"
         );
         unsafe { slice::from_raw_parts_mut(self.ptr.add(start).as_ptr(), len) }
@@ -217,7 +223,7 @@ impl<T> Default for MirroredBuffer<T> {
 
 impl<T> Drop for MirroredBuffer<T> {
     fn drop(&mut self) {
-        if T::IS_ZST || !self.is_not_allocated() {
+        if T::IS_ZST || !self.is_allocated() {
             return;
         }
         unsafe {
@@ -239,13 +245,13 @@ mod tests {
         assert_eq!(buf_new.capacity(), 0);
         assert_eq!(buf_new.virtual_size(), 0);
         assert_eq!(buf_new.physical_size(), 0);
-        assert!(!buf_new.is_not_allocated());
+        assert!(!buf_new.is_allocated());
 
         let buf_default = MirroredBuffer::<u32>::default();
         assert_eq!(buf_default.capacity(), 0);
         assert_eq!(buf_default.virtual_size(), 0);
         assert_eq!(buf_default.physical_size(), 0);
-        assert!(!buf_default.is_not_allocated());
+        assert!(!buf_default.is_allocated());
     }
 
     #[test]
@@ -264,7 +270,7 @@ mod tests {
         // The actual capacity might be larger due to allocation granularity.
         assert!(buf.capacity() >= cap);
         assert!(buf.virtual_size() > 0);
-        assert!(buf.is_not_allocated());
+        assert!(buf.is_allocated());
         assert_eq!(buf.virtual_size(), buf.physical_size() * 2);
         assert_eq!(
             buf.virtual_size() % allocation_granularity(),
@@ -311,7 +317,7 @@ mod tests {
             assert_eq!(*buf.get_unchecked(2).assume_init_ref(), val2);
 
             // Read from the mirrored second half
-            assert_eq!(*buf.get_unchecked(0 + capacity).assume_init_ref(), val1);
+            assert_eq!(*buf.get_unchecked(capacity).assume_init_ref(), val1);
             assert_eq!(*buf.get_unchecked(2 + capacity).assume_init_ref(), val2);
         }
     }

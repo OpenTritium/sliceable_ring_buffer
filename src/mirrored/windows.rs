@@ -82,9 +82,9 @@ pub(crate) fn allocation_granularity() -> usize {
 /// # Errors
 ///
 /// Returns an `Err` if any underlying OS API call fails.
-pub(crate) fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
+pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
-        virtual_size % allocation_granularity() == 0 && virtual_size > 0,
+        virtual_size.is_multiple_of(allocation_granularity()) && virtual_size > 0,
         "virtual_size must be a multiple of allocation_granularity() and > 0"
     );
     // if virtual_size is multiple of allocation_granularity(), so it could be divided by 2
@@ -93,15 +93,15 @@ pub(crate) fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
         physical_size != 0 && physical_size <= MAX_USIZE_WITHOUT_HIGHEST_BIT,
         "physical_size must be in range (0, isize::MAX)"
     );
-    let maximum_size_low = physical_size as u32;
-    let maximum_size_high = (physical_size >> 32) as u32;
+    let max_size_low = physical_size as u32;
+    let max_size_high = (physical_size >> 32) as u32;
     unsafe {
         let file_mapping = CreateFileMappingW(
             INVALID_HANDLE_VALUE,
             None,
             PAGE_READWRITE | SEC_COMMIT,
-            maximum_size_high,
-            maximum_size_low,
+            max_size_high,
+            max_size_low,
             PCWSTR::null(),
         )
         .with_context(|| "CreateFileMappingW failed")?;
@@ -120,7 +120,7 @@ pub(crate) fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
         }
         // free two times to divide the memory region into two halves
         let low_half_addr = placeholder;
-        let high_half_addr = low_half_addr.offset(physical_size as isize);
+        let high_half_addr = low_half_addr.add(physical_size);
         let partition = |addr| {
             if VirtualFree(addr, physical_size, VIRTUAL_FREE_TYPE(MEM_RELEASE.0 | MEM_PRESERVE_PLACEHOLDER.0)).is_err()
             {
@@ -185,7 +185,7 @@ pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> A
     let ptr = ptr as *mut c_void;
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
-        virtual_size % allocation_granularity() == 0 && virtual_size > 0,
+        virtual_size.is_multiple_of(allocation_granularity()) && virtual_size > 0,
         "virtual_size must be a multiple of allocation_granularity() and > 0"
     );
     // if virtual_size is multiple of allocation_granularity(), so it could be divided by 2
@@ -196,7 +196,7 @@ pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> A
     );
     let current_process = GetCurrentProcess();
     let low_ptr = ptr;
-    let high_ptr = ptr.offset(physical_size as isize);
+    let high_ptr = ptr.add(physical_size);
     let into_view = |p| MEMORY_MAPPED_VIEW_ADDRESS { Value: p };
     let unmap_low_result = UnmapViewOfFile2(current_process, into_view(low_ptr), MEM_UNMAP_NONE);
     let unmap_high_result = UnmapViewOfFile2(current_process, into_view(high_ptr), MEM_UNMAP_NONE);
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn test_happy_path_allocation() {
         let virtual_size = allocation_granularity() * 16;
-        let ptr = allocate_mirrored(virtual_size).expect("Failed to allocate mirrored memory");
+        let ptr = unsafe { allocate_mirrored(virtual_size).expect("Failed to allocate mirrored memory") };
         assert!(!ptr.is_null(), "Allocated pointer should not be null");
         unsafe {
             deallocate_mirrored(ptr, virtual_size).expect("Failed to deallocate mirrored memory");
@@ -230,7 +230,7 @@ mod tests {
     fn test_mirrored_write_read() {
         let virtual_size = allocation_granularity() * 4;
         let physical_size = virtual_size / 2;
-        let ptr = allocate_mirrored(virtual_size).expect("Allocation failed");
+        let ptr = unsafe { allocate_mirrored(virtual_size).expect("Allocation failed") };
         unsafe {
             let full_slice = slice::from_raw_parts_mut(ptr, virtual_size);
             let test_data = (0..physical_size).map(|i| (i % 256) as u8).collect::<Vec<u8>>();
@@ -258,7 +258,7 @@ mod tests {
     fn test_write_across_boundary() {
         let virtual_size = allocation_granularity() * 8;
         let physical_size = virtual_size / 2;
-        let ptr = allocate_mirrored(virtual_size).expect("Allocation failed");
+        let ptr = unsafe { allocate_mirrored(virtual_size).expect("Allocation failed") };
         unsafe {
             let full_slice = slice::from_raw_parts_mut(ptr, virtual_size);
             let test_data = b"hello_world";
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn test_minimum_valid_size() {
         let min_virtual_size = allocation_granularity() * 2;
-        let ptr = allocate_mirrored(min_virtual_size).expect("Allocation with minimum valid size failed");
+        let ptr = unsafe { allocate_mirrored(min_virtual_size).expect("Allocation with minimum valid size failed") };
         assert!(!ptr.is_null());
         unsafe {
             let p = ptr.as_mut().unwrap();

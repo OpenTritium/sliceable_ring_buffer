@@ -1,5 +1,6 @@
 Copyright (c) 2017 Gonzalo Brito Gadeschi
 Copyright (c) 2017 The Rust Project Developers
+Copyright (c) 2025 openTritium
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated

@@ -2,6 +2,11 @@
 mod buffer;
 mod utils;
 
+pub(crate) use buffer::MirroredBuffer;
+pub(crate) use utils::{mirrored_allocation_unit, MAX_USIZE_WITHOUT_HIGHEST_BIT};
+
+// platform cfg
+
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "openbsd"))]
 mod linux;
 #[cfg(all(target_os = "linux", target_os = "android", target_os = "openbsd"))]
@@ -18,7 +23,3 @@ mod windows;
 
 #[cfg(target_os = "windows")]
 pub(crate) use windows::*;
-
-pub(crate) use buffer::MirroredBuffer;
-pub(crate) use utils::MAX_USIZE_WITHOUT_HIGHEST_BIT;
-pub(crate) use utils::mirrored_allocation_unit;
