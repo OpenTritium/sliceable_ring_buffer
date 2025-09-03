@@ -2,8 +2,8 @@
 mod buffer;
 mod utils;
 
-pub(crate) use buffer::MirroredBuffer;
-pub(crate) use utils::{mirrored_allocation_unit, MAX_USIZE_WITHOUT_HIGHEST_BIT};
+pub(crate) use buffer::{MirroredBuffer, Size};
+pub(crate) use utils::{MAX_PHYSICAL_BUF_SIZE, MAX_VIRTUAL_BUF_SIZE, mirrored_allocation_unit};
 
 // platform cfg
 

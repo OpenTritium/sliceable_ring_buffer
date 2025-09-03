@@ -1,28 +1,27 @@
 //! Implements the allocator hooks on top of window's virtual alloc.
-use anyhow::{bail, Context, Result as AnyResult};
+use anyhow::{Context, Result as AnyResult, bail};
 use core::{
     ffi::c_void,
     mem::MaybeUninit,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use windows::{
-    core::PCWSTR,
     Win32::{
         Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
         System::{
             Memory::{
-                CreateFileMappingW, MapViewOfFile3, UnmapViewOfFile2, VirtualAlloc2, VirtualFree,
-                MEMORY_MAPPED_VIEW_ADDRESS, MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER,
-                MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, MEM_UNMAP_NONE, PAGE_NOACCESS, PAGE_READWRITE, SEC_COMMIT,
-                VIRTUAL_FREE_TYPE,
+                CreateFileMappingW, MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER, MEM_RESERVE,
+                MEM_RESERVE_PLACEHOLDER, MEM_UNMAP_NONE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile3, PAGE_NOACCESS,
+                PAGE_READWRITE, SEC_COMMIT, UnmapViewOfFile2, VIRTUAL_FREE_TYPE, VirtualAlloc2, VirtualFree,
             },
             SystemInformation::{GetSystemInfo, SYSTEM_INFO},
             Threading::GetCurrentProcess,
         },
     },
+    core::PCWSTR,
 };
 
-use crate::mirrored::MAX_USIZE_WITHOUT_HIGHEST_BIT;
+use crate::mirrored::MAX_VIRTUAL_BUF_SIZE;
 
 /// Retrieves the system's memory allocation granularity, caching the value for performance.
 ///
@@ -90,7 +89,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     // if virtual_size is multiple of allocation_granularity(), so it could be divided by 2
     let physical_size = virtual_size / 2;
     debug_assert!(
-        physical_size != 0 && physical_size <= MAX_USIZE_WITHOUT_HIGHEST_BIT,
+        physical_size != 0 && physical_size <= MAX_VIRTUAL_BUF_SIZE,
         "physical_size must be in range (0, isize::MAX)"
     );
     let max_size_low = physical_size as u32;
@@ -194,19 +193,21 @@ pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> A
         physical_size != 0 && physical_size <= isize::MAX as usize,
         "physical_size must be in range (0, isize::MAX)"
     );
-    let current_process = GetCurrentProcess();
-    let low_ptr = ptr;
-    let high_ptr = ptr.add(physical_size);
-    let into_view = |p| MEMORY_MAPPED_VIEW_ADDRESS { Value: p };
-    let unmap_low_result = UnmapViewOfFile2(current_process, into_view(low_ptr), MEM_UNMAP_NONE);
-    let unmap_high_result = UnmapViewOfFile2(current_process, into_view(high_ptr), MEM_UNMAP_NONE);
-    // no need to free the placeholder, it already has been freed by the unmap operation
-    if unmap_low_result.is_err() || unmap_high_result.is_err() {
-        bail!(
-            "Failed to fully deallocate mirrored memory. Status: [Unmap Low: {:?}, Unmap High: {:?}]",
-            unmap_low_result,
-            unmap_high_result,
-        )
+    unsafe {
+        let current_process = GetCurrentProcess();
+        let low_ptr = ptr;
+        let high_ptr = ptr.add(physical_size);
+        let into_view = |p| MEMORY_MAPPED_VIEW_ADDRESS { Value: p };
+        let unmap_low_result = UnmapViewOfFile2(current_process, into_view(low_ptr), MEM_UNMAP_NONE);
+        let unmap_high_result = UnmapViewOfFile2(current_process, into_view(high_ptr), MEM_UNMAP_NONE);
+        // no need to free the placeholder, it already has been freed by the unmap operation
+        if unmap_low_result.is_err() || unmap_high_result.is_err() {
+            bail!(
+                "Failed to fully deallocate mirrored memory. Status: [Unmap Low: {:?}, Unmap High: {:?}]",
+                unmap_low_result,
+                unmap_high_result,
+            )
+        }
     }
     Ok(())
 }

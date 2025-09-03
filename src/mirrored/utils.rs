@@ -6,10 +6,7 @@ use num::Integer;
 /// To ensure a valid virtual memory mapping, the size of a single mirrored region must be a
 /// common multiple of `sizeof::<T>()` and the system's allocation granularity.
 pub(crate) fn mirrored_allocation_unit<T>(count: usize) -> usize {
-    if T::IS_ZST {
-        return 0;
-    }
-    if count == 0 {
+    if count == 0 || T::IS_ZST {
         return 0;
     }
     let ag = allocation_granularity();
@@ -20,4 +17,5 @@ pub(crate) fn mirrored_allocation_unit<T>(count: usize) -> usize {
     blocks.strict_mul(base).strict_mul(2)
 }
 
-pub const MAX_USIZE_WITHOUT_HIGHEST_BIT: usize = isize::MAX as usize;
+pub const MAX_VIRTUAL_BUF_SIZE: usize = isize::MAX as usize;
+pub const MAX_PHYSICAL_BUF_SIZE: usize = MAX_VIRTUAL_BUF_SIZE / 2;
