@@ -16,7 +16,7 @@ use core::{
 use mirrored::{MAX_VIRTUAL_BUF_SIZE, MirroredBuffer, mirrored_allocation_unit};
 use num::Zero;
 
-use crate::mirrored::MAX_PHYSICAL_BUF_SIZE;
+use crate::mirrored::{MAX_PHYSICAL_BUF_SIZE, Size};
 
 pub struct SliceRingBuffer<T> {
     buf: MirroredBuffer<T>,
@@ -25,12 +25,14 @@ pub struct SliceRingBuffer<T> {
 }
 
 impl<T> SliceRingBuffer<T> {
+    const GROW_FACTOR: usize = 2;
+
     /// 创建一个容量为0的容器
     /// 对于 ZST 类型，容量则为 isize::MAX / 2
     #[inline(always)]
     pub fn new() -> Self {
         if T::IS_ZST {
-            return Self::with_capacity(MAX_VIRTUAL_BUF_SIZE);
+            return Self::with_capacity(MAX_PHYSICAL_BUF_SIZE);
         }
         Self::with_capacity(0)
     }
@@ -225,8 +227,12 @@ impl<T> SliceRingBuffer<T> {
         unsafe {
             assert!(self.len().checked_add(1) <= Some(MAX_PHYSICAL_BUF_SIZE));
             let required_cap = self.len() + 1;
-            if !T::IS_ZST && self.capacity() < required_cap {
-                self.realloc_and_restore_part(required_cap.strict_mul(2));
+            if T::IS_ZST {
+                self.buf.size = Size::new_unchecked(required_cap);
+                return self.try_push_front(value).unwrap_unchecked();
+            }
+            if self.capacity() < required_cap {
+                self.realloc_and_restore_part(required_cap.strict_mul(Self::GROW_FACTOR));
             }
             self.try_push_front(value).unwrap_unchecked()
         }
@@ -253,8 +259,12 @@ impl<T> SliceRingBuffer<T> {
         unsafe {
             assert!(self.len().checked_add(1) <= Some(MAX_PHYSICAL_BUF_SIZE));
             let required_cap = self.len() + 1;
-            if !T::IS_ZST && self.capacity() < required_cap {
-                self.realloc_and_restore_part(required_cap.strict_mul(2));
+            if T::IS_ZST && self.capacity() < required_cap {
+                self.buf.size = Size::new_unchecked(required_cap);
+                return self.try_push_back(value).unwrap_unchecked();
+            }
+            if self.capacity() < required_cap {
+                self.realloc_and_restore_part(required_cap.strict_mul(Self::GROW_FACTOR));
             }
             self.try_push_back(value).unwrap_unchecked()
         }
@@ -916,5 +926,109 @@ mod tests {
         rb.shrink_to_fit();
         assert_eq!(rb.capacity(), 0x4000);
         assert_eq!(rb.as_slice(), &[0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_slice_ring_buffer_empty() {
+        let rb: SliceRingBuffer<i32> = SliceRingBuffer::new();
+        assert!(rb.is_empty());
+        assert_eq!(rb.len(), 0);
+        assert_eq!(rb.capacity(), 0);
+        assert_eq!(rb.as_slice(), &[]);
+    }
+
+    #[test]
+    fn test_slice_ring_buffer_with_capacity() {
+        let rb: SliceRingBuffer<i32> = SliceRingBuffer::with_capacity(10);
+        assert!(rb.is_empty());
+        assert_eq!(rb.len(), 0);
+        assert!(rb.capacity() >= 10);
+        assert_eq!(rb.as_slice(), &[]);
+    }
+
+    #[test]
+    fn test_push_back_and_front() {
+        let mut rb = SliceRingBuffer::new();
+        rb.push_back(1);
+        rb.push_back(2);
+        rb.push_back(3);
+
+        assert_eq!(rb.len(), 3);
+        assert_eq!(rb.front(), Some(&1));
+        assert_eq!(rb.back(), Some(&3));
+        assert_eq!(rb.as_slice(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_push_front_and_back() {
+        let mut rb = SliceRingBuffer::new();
+        rb.push_front(1);
+        rb.push_front(2);
+        rb.push_front(3);
+
+        assert_eq!(rb.len(), 3);
+        assert_eq!(rb.front(), Some(&3));
+        assert_eq!(rb.back(), Some(&1));
+        assert_eq!(rb.as_slice(), &[3, 2, 1]);
+    }
+
+    #[test]
+    fn test_pop_operations() {
+        let mut rb = SliceRingBuffer::from(vec![1, 2, 3, 4, 5]);
+
+        assert_eq!(rb.pop_front(), Some(1));
+        assert_eq!(rb.len(), 4);
+
+        assert_eq!(rb.pop_back(), Some(5));
+        assert_eq!(rb.len(), 3);
+
+        assert_eq!(rb.as_slice(), &[2, 3, 4]);
+    }
+
+    #[test]
+    fn test_index_access() {
+        let mut rb = SliceRingBuffer::from(vec![1, 2, 3]);
+        assert_eq!(rb[0], 1);
+        assert_eq!(rb[1], 2);
+        assert_eq!(rb[2], 3);
+
+        rb[1] = 5;
+        assert_eq!(rb[1], 5);
+        assert_eq!(rb.as_slice(), &[1, 5, 3]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_index_out_of_bounds() {
+        let rb: SliceRingBuffer<i32> = SliceRingBuffer::from(vec![1, 2, 3]);
+        let _ = rb[5];
+    }
+
+    #[test]
+    fn test_reserve_and_shrink() {
+        let mut rb = SliceRingBuffer::with_capacity(5);
+        rb.extend(0..5);
+        assert_eq!(rb.len(), 5);
+        assert!(rb.capacity() >= 5);
+
+        rb.reserve(10);
+        assert!(rb.capacity() >= 10);
+
+        rb.shrink_to_fit();
+        // After shrinking, capacity should be reasonable
+        assert!(rb.capacity() >= rb.len());
+    }
+
+    #[test]
+    fn test_slice_ring_buffer_zst() {
+        // Test SliceRingBuffer with Zero Sized Types
+        let mut rb: SliceRingBuffer<()> = SliceRingBuffer::new();
+        println!("{}", rb.capacity());
+        rb.push_back(());
+        rb.push_back(());
+        println!("{}", rb.capacity());
+        assert_eq!(rb.len(), 2);
+        assert_eq!(rb.pop_front(), Some(()));
+        assert_eq!(rb.len(), 1);
     }
 }

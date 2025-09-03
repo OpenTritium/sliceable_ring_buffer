@@ -1,5 +1,3 @@
-use std::{thread::sleep, time::Duration};
-
 use slice_ring_buffer::SliceRingBuffer;
 fn main() {
     let mut rb = SliceRingBuffer::with_capacity(8);

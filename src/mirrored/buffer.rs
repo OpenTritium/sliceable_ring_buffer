@@ -354,6 +354,7 @@ mod tests {
     fn alignment_test() {
         // Define a type with a specific, larger-than-usual alignment
         #[repr(align(32))]
+        #[allow(dead_code)]
         struct AlignedType(u64);
 
         // This test will panic if the assertion `align_of::<T>() <= ag` fails.
@@ -365,5 +366,12 @@ mod tests {
         // Check if the returned pointer is indeed aligned.
         let ptr_addr = buf.as_ptr() as usize;
         assert_eq!(ptr_addr % align_of::<AlignedType>(), 0, "Pointer is not correctly aligned");
+    }
+
+    #[test]
+    fn test_mirrored_buffer_zst() {
+        // Test MirroredBuffer with Zero Sized Types
+        let buf = MirroredBuffer::<()>::with_capacity(10);
+        assert!(buf.physical_capacity() == 5);
     }
 }
