@@ -17,5 +17,5 @@ pub(crate) fn mirrored_allocation_unit<T>(count: usize) -> usize {
     blocks.strict_mul(base).strict_mul(2)
 }
 
-pub const MAX_VIRTUAL_BUF_SIZE: usize = isize::MAX as usize;
-pub const MAX_PHYSICAL_BUF_SIZE: usize = MAX_VIRTUAL_BUF_SIZE / 2;
+pub const MAX_VIRTUAL_BUF_SIZE: usize = MAX_PHYSICAL_BUF_SIZE * 2;
+pub const MAX_PHYSICAL_BUF_SIZE: usize = (isize::MAX as usize >> 1) - 1;

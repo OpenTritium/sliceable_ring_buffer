@@ -15,7 +15,7 @@ use crate::mirrored::utils::mirrored_allocation_unit;
 use core::{
     mem::{MaybeUninit, SizedTypeProperties, size_of},
     ops::{Deref, DerefMut},
-    ptr::NonNull,
+    ptr::{NonNull, copy_nonoverlapping},
     slice,
 };
 use num::Integer;
@@ -29,20 +29,25 @@ pub type Size = core::num::niche_types::UsizeNoHighBit;
 /// # Invariants
 ///
 /// - If `ptr` is not dangling, `size` must be non-zero.
-/// - The total virtual memory size (`size`) must not exceed `isize::MAX` bytes.
+/// - The total virtual memory size (`size`) must not exceed `MAX_VIRTUAL_BUF_SIZE` bytes.
 /// - The allocated memory is laid out such that the virtual address range `[ptr, ptr + size/2)` is mirrored to the
 ///   range `[ptr + size/2, ptr + size)`.
+/// - for ZST, `ptr` is always dangling.
+#[derive(Debug)]
 pub(crate) struct MirroredBuffer<T> {
     ptr: NonNull<T>,
-    pub size: Size, /* The total byte length of the underlying virtual memory region. Must not exceed
-                     * `isize::MAX`. */
+    size: Size,
 }
 
 impl<T> MirroredBuffer<T> {
-    /// Creates a new, empty `MirroredBuffer` without allocating memory.
-    #[must_use]
     #[inline(always)]
-    pub fn new() -> Self { Self::with_capacity(0) }
+    pub(crate) unsafe fn set_size_unchecked(&mut self, value: usize) {
+        self.size = unsafe { Size::new_unchecked(value) };
+    }
+
+    /// Creates a new, empty `MirroredBuffer` without allocating memory.
+    #[inline(always)]
+    pub fn new() -> Self { Self::with_capacity(if T::IS_ZST { MAX_VIRTUAL_BUF_SIZE } else { 0 }) }
 
     /// Returns the number of elements of type `T` that can be stored in the physical region.
     ///
@@ -53,6 +58,12 @@ impl<T> MirroredBuffer<T> {
         let t_size = if T::IS_ZST { 1 } else { size_of::<T>() };
         debug_assert!(p_size.is_multiple_of(t_size));
         p_size / t_size
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        debug_assert!(self.virtual_size().is_multiple_of(2));
+        self.virtual_size() == 0
     }
 
     /// Returns the total byte length of the entire virtual memory region.
@@ -87,7 +98,7 @@ impl<T> MirroredBuffer<T> {
     ///
     /// The caller must ensure that `virtual_size` meets the following criteria:
     /// - If non-zero, it must be a multiple of the system's `allocation_granularity`.
-    /// - It must be less than or equal to `isize::MAX`.
+    /// - It must be less than or equal to `MAX_VIRTUAL_BUF_SIZE`.
     /// - The alignment of `T` must be less than or equal to the `allocation_granularity`.
     ///
     /// Violating these conditions can lead to allocation failures or undefined behavior.
@@ -137,31 +148,31 @@ impl<T> MirroredBuffer<T> {
     /// # Panics
     ///
     /// Panics if the range `[start, start + len)` is out of bounds of the virtual slice,
-    /// or if the resulting slice's byte length would exceed `isize::MAX`.
+    /// or if the resulting slice's byte length would exceed `MAX_VIRTUAL_BUF_SIZE`.
     #[inline(always)]
     pub fn virtual_uninit_slice_at(&self, start: usize, len: usize) -> &[MaybeUninit<T>] {
         debug_assert!(start.checked_add(len) <= Some(self.virtual_capacity()), "slice bounds out of virtual capacity");
         debug_assert!(
             len.checked_mul(size_of::<T>()).is_some_and(|bytes| bytes <= MAX_VIRTUAL_BUF_SIZE),
-            "slice byte length exceeds isize::MAX"
+            "slice byte length exceeds MAX_VIRTUAL_BUF_SIZE"
         );
         unsafe { self.as_uninit_virtaul_slice().get_unchecked(start..start + len) }
     }
 
-    /// Returns a view of a sub-slice of the virtual memory region.
+    /// Returns a mutable view of a sub-slice of the virtual memory region.
     ///
     /// The indices `start` and `len` are relative to the entire virtual region.
     ///
     /// # Panics
     ///
     /// Panics if the range `[start, start + len]` is out of bounds of the virtual slice,
-    /// or if the resulting slice's byte length would exceed `isize::MAX`.
+    /// or if the resulting slice's byte length would exceed `MAX_VIRTUAL_BUF_SIZE`.
     #[inline(always)]
     pub fn virtual_uninit_slice_mut_at(&mut self, start: usize, len: usize) -> &mut [MaybeUninit<T>] {
         debug_assert!(start.checked_add(len) <= Some(self.virtual_capacity()), "slice bounds out of virtual capacity");
         debug_assert!(
             len.checked_mul(size_of::<T>()).is_some_and(|bytes| bytes <= MAX_VIRTUAL_BUF_SIZE),
-            "slice byte length exceeds isize::MAX"
+            "slice byte length exceeds MAX_VIRTUAL_BUF_SIZE"
         );
         unsafe { self.as_uninit_virtual_mut_slice().get_unchecked_mut(start..start + len) }
     }
@@ -202,6 +213,55 @@ impl<T> Drop for MirroredBuffer<T> {
 unsafe impl<T> Send for MirroredBuffer<T> where T: Send {}
 unsafe impl<T> Sync for MirroredBuffer<T> where T: Sync {}
 
+impl<T: Clone> Clone for MirroredBuffer<T> {
+    fn clone(&self) -> Self {
+        if T::IS_ZST {
+            return Self { ptr: NonNull::dangling(), size: self.size };
+        }
+        if self.is_empty() {
+            return Self { ptr: NonNull::dangling(), size: unsafe { Size::new_unchecked(0) } };
+        }
+        let new_buf = unsafe { Self::alloc(self.virtual_capacity()) };
+        unsafe {
+            let src = self.ptr.as_ptr() as *const u8;
+            let dst = new_buf.ptr.as_ptr() as *mut u8;
+            copy_nonoverlapping(src, dst, self.physical_size());
+        }
+        new_buf
+    }
+
+    fn clone_from(&mut self, src: &Self) {
+        if T::IS_ZST {
+            self.size = src.size;
+            return;
+        }
+        if self.is_empty() {
+            *self = Self { ptr: NonNull::dangling(), size: unsafe { Size::new_unchecked(0) } };
+            return;
+        }
+        if self.virtual_size() >= src.virtual_size() {
+            unsafe {
+                let src = src.ptr.as_ptr() as *const u8;
+                let dst = self.ptr.as_ptr() as *mut u8;
+                copy_nonoverlapping(src, dst, self.physical_size());
+            }
+        } else {
+            if !self.is_empty() {
+                unsafe {
+                    deallocate_mirrored(self.ptr.as_ptr() as *mut u8, self.virtual_size())
+                        .expect("Failed to deallocate memory");
+                }
+            }
+            *self = unsafe { Self::alloc(src.virtual_size()) };
+            unsafe {
+                let src = src.ptr.as_ptr() as *const u8;
+                let dst = self.ptr.as_ptr() as *mut u8;
+                copy_nonoverlapping(src, dst, self.physical_size());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +280,14 @@ mod tests {
     }
 
     #[test]
+    fn zst_full_cap_when_new_or_default() {
+        let buf_new = MirroredBuffer::<()>::new();
+        assert_eq!(buf_new.physical_capacity(), MAX_PHYSICAL_BUF_SIZE);
+        assert_eq!(buf_new.virtual_size(), MAX_VIRTUAL_BUF_SIZE);
+        assert_eq!(buf_new.physical_size(), MAX_PHYSICAL_BUF_SIZE);
+    }
+
+    #[test]
     fn with_capacity_zero_is_empty() {
         let buf = MirroredBuffer::<u8>::with_capacity(0);
         assert_eq!(buf.physical_capacity(), 0);
@@ -233,14 +301,12 @@ mod tests {
         let buf = MirroredBuffer::<i32>::with_capacity(cap);
 
         // The actual capacity might be larger due to allocation granularity.
+        let mau = mirrored_allocation_unit::<i32>(cap);
         assert!(buf.physical_capacity() >= cap);
+        assert_eq!(buf.virtual_size(), mau);
         assert!(buf.virtual_size() > 0);
         assert_eq!(buf.virtual_size(), buf.physical_size() * 2);
-        assert_eq!(
-            buf.virtual_size() % allocation_granularity(),
-            0,
-            "Virtual size should be a multiple of allocation granularity"
-        );
+        assert!(buf.virtual_size().is_multiple_of(allocation_granularity()));
     }
 
     #[test]
@@ -346,7 +412,7 @@ mod tests {
         let buf = MirroredBuffer::<u8>::with_capacity(16);
         let v_len = buf.virtual_capacity();
 
-        // 这应该会 panic，因为起始点已经超出了范围 (v_len + 1)
+        // This should panic because start is out of bounds
         let _slice = buf.virtual_uninit_slice_at(v_len + 1, 0);
     }
 
@@ -373,5 +439,241 @@ mod tests {
         // Test MirroredBuffer with Zero Sized Types
         let buf = MirroredBuffer::<()>::with_capacity(10);
         assert!(buf.physical_capacity() == 5);
+    }
+
+    #[test]
+    fn deref_and_deref_mut_traits() {
+        let mut buf = MirroredBuffer::<i32>::with_capacity(8);
+        let cap = buf.physical_capacity();
+
+        // Test Deref trait
+        assert_eq!(buf.len(), cap * 2);
+
+        // Test DerefMut trait
+        buf[0] = MaybeUninit::new(42);
+        unsafe {
+            assert_eq!(*buf[0].assume_init_ref(), 42);
+        }
+    }
+
+    #[test]
+    fn as_uninit_virtual_slices() {
+        let mut buf = MirroredBuffer::<u16>::with_capacity(4);
+        let virtual_capacity = buf.virtual_capacity();
+
+        // Test immutable slice
+        let slice = buf.as_uninit_virtaul_slice();
+        assert_eq!(slice.len(), virtual_capacity);
+
+        // Test mutable slice
+        let slice_mut = buf.as_uninit_virtual_mut_slice();
+        assert_eq!(slice_mut.len(), virtual_capacity);
+    }
+
+    #[test]
+    fn different_capacities() {
+        // Test with a range of capacities
+        for cap in [1, 2, 4, 8, 16, 32, 64, 128] {
+            let buf = MirroredBuffer::<u8>::with_capacity(cap);
+            assert!(buf.physical_capacity() >= cap);
+            assert!(buf.virtual_size() > 0);
+            assert_eq!(buf.virtual_size(), buf.physical_size() * 2);
+        }
+    }
+
+    #[test]
+    fn send_and_sync_traits() {
+        // Verify that MirroredBuffer implements Send and Sync when T does
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        // This will compile only if MirroredBuffer implements Send and Sync
+        assert_send_sync::<MirroredBuffer<u32>>();
+        assert_send_sync::<MirroredBuffer<String>>();
+    }
+
+    #[test]
+    fn virtual_uninit_slice_methods() {
+        let mut buf = MirroredBuffer::<i32>::with_capacity(8);
+        let physical_capacity = buf.physical_capacity();
+        let virtual_capacity = buf.virtual_capacity();
+
+        // Test virtual_uninit_slice_at
+        let slice_start = buf.virtual_uninit_slice_at(0, physical_capacity);
+        assert_eq!(slice_start.len(), physical_capacity);
+
+        let slice_end = buf.virtual_uninit_slice_at(physical_capacity, physical_capacity);
+        assert_eq!(slice_end.len(), physical_capacity);
+
+        // Test virtual_uninit_slice_mut_at
+        let slice_mut = buf.virtual_uninit_slice_mut_at(0, virtual_capacity);
+        assert_eq!(slice_mut.len(), virtual_capacity);
+    }
+
+    #[test]
+    fn size_methods() {
+        let buf = MirroredBuffer::<u64>::with_capacity(16);
+
+        // Check that size methods return consistent values
+        let virtual_size = buf.virtual_size();
+        let physical_size = buf.physical_size();
+        let physical_capacity = buf.physical_capacity();
+
+        assert_eq!(virtual_size, physical_size * 2);
+        assert_eq!(physical_capacity * size_of::<u64>(), physical_size);
+    }
+
+    // Additional tests to further improve coverage:
+
+    #[test]
+    fn different_type_alignments() {
+        // Test with different alignments
+        #[repr(align(1))]
+        struct Align1(u8);
+
+        #[repr(align(2))]
+        struct Align2(u8);
+
+        #[repr(align(4))]
+        struct Align4(u8);
+
+        #[repr(align(8))]
+        struct Align8(u8);
+
+        let buf1 = MirroredBuffer::<Align1>::with_capacity(4);
+        assert!(buf1.physical_capacity() >= 4);
+
+        let buf2 = MirroredBuffer::<Align2>::with_capacity(4);
+        assert!(buf2.physical_capacity() >= 4);
+
+        let buf4 = MirroredBuffer::<Align4>::with_capacity(4);
+        assert!(buf4.physical_capacity() >= 4);
+
+        let buf8 = MirroredBuffer::<Align8>::with_capacity(4);
+        assert!(buf8.physical_capacity() >= 4);
+    }
+
+    #[test]
+    fn different_type_sizes() {
+        // Test with different sized types
+        let buf1 = MirroredBuffer::<u8>::with_capacity(16);
+        assert!(buf1.physical_capacity() >= 16);
+
+        let buf2 = MirroredBuffer::<u16>::with_capacity(16);
+        assert!(buf2.physical_capacity() >= 16);
+
+        let buf3 = MirroredBuffer::<u32>::with_capacity(16);
+        assert!(buf3.physical_capacity() >= 16);
+
+        let buf4 = MirroredBuffer::<u64>::with_capacity(16);
+        assert!(buf4.physical_capacity() >= 16);
+    }
+
+    #[test]
+    #[should_panic]
+    fn extreme_capacities() {
+        // Test with small and large capacities
+        let _ = MirroredBuffer::<u8>::with_capacity(MAX_VIRTUAL_BUF_SIZE + 1);
+    }
+
+    #[test]
+    fn zero_sized_types_extensive() {
+        // More extensive testing of ZSTs
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        struct ZeroSizedType;
+
+        let buf = MirroredBuffer::<ZeroSizedType>::with_capacity(100);
+        assert!(buf.physical_capacity() >= 50); // Should be half of 100
+
+        // Test that we can "write" to a ZST buffer
+        let slice = buf.as_uninit_virtaul_slice();
+        assert_eq!(slice.len(), buf.virtual_capacity());
+    }
+
+    #[test]
+    fn deref_deref_mut_consistency() {
+        let mut buf = MirroredBuffer::<i32>::with_capacity(8);
+
+        // Test consistency between Deref and DerefMut
+        let len_through_deref = buf.len();
+        let len_through_method = buf.virtual_capacity();
+        assert_eq!(len_through_deref, len_through_method);
+
+        // Test writing through DerefMut
+        buf[0] = MaybeUninit::new(12345);
+        unsafe {
+            assert_eq!(*buf[0].assume_init_ref(), 12345);
+        }
+    }
+
+    #[test]
+    fn slice_methods_edge_cases() {
+        // Test edge cases for slice methods
+        let mut buf = MirroredBuffer::<u8>::with_capacity(8);
+        let capacity = buf.physical_capacity();
+        let virtual_capacity = buf.virtual_capacity();
+
+        // Test getting a slice of length 0
+        let empty_slice = buf.virtual_uninit_slice_at(0, 0);
+        assert_eq!(empty_slice.len(), 0);
+
+        let empty_slice_mut = buf.virtual_uninit_slice_mut_at(0, 0);
+        assert_eq!(empty_slice_mut.len(), 0);
+
+        // Test getting a slice of length 1
+        let single_slice = buf.virtual_uninit_slice_at(0, 1);
+        assert_eq!(single_slice.len(), 1);
+
+        let single_slice_mut = buf.virtual_uninit_slice_mut_at(0, 1);
+        assert_eq!(single_slice_mut.len(), 1);
+
+        // Test getting slice at the boundary
+        let boundary_slice = buf.virtual_uninit_slice_at(capacity - 1, 2);
+        assert_eq!(boundary_slice.len(), 2);
+    }
+
+    #[test]
+    fn test_clone() {
+        // Test cloning an empty buffer
+        let empty_buf = MirroredBuffer::<u32>::new();
+        let cloned_empty = empty_buf.clone();
+        assert_eq!(empty_buf.virtual_size(), cloned_empty.virtual_size());
+        assert_eq!(empty_buf.physical_capacity(), cloned_empty.physical_capacity());
+
+        // Test cloning a buffer with data
+        let mut buf = MirroredBuffer::<u32>::with_capacity(4);
+        unsafe {
+            *buf.get_unchecked_mut(0).as_mut_ptr() = 100;
+            *buf.get_unchecked_mut(1).as_mut_ptr() = 200;
+        }
+
+        let cloned_buf = buf.clone();
+        assert_eq!(buf.virtual_size(), cloned_buf.virtual_size());
+        assert_eq!(buf.physical_capacity(), cloned_buf.physical_capacity());
+
+        // Verify that the data was copied correctly
+        unsafe {
+            assert_eq!(*cloned_buf.get_unchecked(0).assume_init_ref(), 100);
+            assert_eq!(*cloned_buf.get_unchecked(1).assume_init_ref(), 200);
+        }
+
+        // Verify that modifying one doesn't affect the other
+        unsafe {
+            *buf.get_unchecked_mut(0).as_mut_ptr() = 300;
+        }
+
+        unsafe {
+            assert_eq!(*buf.get_unchecked(0).assume_init_ref(), 300);
+            assert_eq!(*cloned_buf.get_unchecked(0).assume_init_ref(), 100); // Should be unchanged
+        }
+    }
+
+    #[test]
+    fn test_clone_zst() {
+        // Test cloning with Zero Sized Types
+        let buf = MirroredBuffer::<()>::with_capacity(100);
+        let cloned_buf = buf.clone();
+
+        assert_eq!(buf.virtual_size(), cloned_buf.virtual_size());
+        assert_eq!(buf.physical_capacity(), cloned_buf.physical_capacity());
     }
 }
