@@ -10,8 +10,8 @@ use crate::mirrored::MAX_PHYSICAL_BUF_SIZE;
 use core::{
     cmp::Ordering,
     iter::{FromIterator, FusedIterator},
-    mem::{self, MaybeUninit, SizedTypeProperties, replace},
-    ops::{Bound, Deref, DerefMut, Neg, RangeBounds},
+    mem::{MaybeUninit, SizedTypeProperties, replace, zeroed},
+    ops::{Bound, Deref, DerefMut, Neg, Not, RangeBounds},
     ptr::{NonNull, copy, copy_nonoverlapping, drop_in_place, read, slice_from_raw_parts_mut, write},
 };
 use mirrored::{MAX_VIRTUAL_BUF_SIZE, MirroredBuffer, mirrored_allocation_unit};
@@ -87,7 +87,7 @@ impl<'a, T> Iterator for Drain<'a, T> {
 
         if T::IS_ZST {
             self.processed += 1;
-            return Some(unsafe { mem::zeroed() });
+            return Some(unsafe { zeroed() });
         }
 
         let capacity = self.deque.capacity();
@@ -115,7 +115,7 @@ impl<'a, T> DoubleEndedIterator for Drain<'a, T> {
 
         if T::IS_ZST {
             self.drain_len -= 1;
-            return Some(unsafe { mem::zeroed() });
+            return Some(unsafe { zeroed() });
         }
 
         let capacity = self.deque.capacity();
@@ -302,7 +302,7 @@ impl<T> SliceRingBuffer<T> {
     /// assert_eq!(buf.get(2), Some(&3));
     /// assert_eq!(buf.get(3), None);
     /// ```
-    #[inline]
+    #[inline(always)]
     pub fn get(&self, index: usize) -> Option<&T> {
         if index >= self.len() {
             None
@@ -334,7 +334,7 @@ impl<T> SliceRingBuffer<T> {
     ///
     /// assert_eq!(buf.as_slice(), &[1, 7, 3]);
     /// ```
-    #[inline]
+    #[inline(always)]
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
         if index >= self.len() {
             None
@@ -438,14 +438,14 @@ impl<T> SliceRingBuffer<T> {
     }
 
     /// 禁止 ZST 调用此函数
-    fn realloc_and_restore_part(&mut self, new_v_cap: usize) {
-        debug_assert!(new_v_cap <= MAX_VIRTUAL_BUF_SIZE && new_v_cap.is_multiple_of(2));
+    fn realloc_and_restore_part(&mut self, new_p_cap: usize) {
+        debug_assert!(new_p_cap <= MAX_PHYSICAL_BUF_SIZE);
         debug_assert!(!T::IS_ZST);
         unsafe {
             let len = self.len();
-            let obsolete_len = len.saturating_sub(new_v_cap);
+            let obsolete_len = len.saturating_sub(new_p_cap);
             let reserve_len = len - obsolete_len;
-            let new_buf = MirroredBuffer::<T>::with_capacity(new_v_cap);
+            let new_buf = MirroredBuffer::<T>::with_capacity(new_p_cap);
             let old_buf = &mut self.buf;
             if obsolete_len.is_zero() {
                 let dst = new_buf.as_ptr();
@@ -591,7 +591,7 @@ impl<T> SliceRingBuffer<T> {
         }
         if T::IS_ZST {
             self.move_tail(-1);
-            return Some(unsafe { mem::zeroed() });
+            return Some(unsafe { zeroed() });
         }
         unsafe {
             let removed = self.last_mut().map(|p| read(p as *mut _))?;
@@ -607,7 +607,7 @@ impl<T> SliceRingBuffer<T> {
         }
         if T::IS_ZST {
             self.move_head(1);
-            return Some(unsafe { mem::zeroed() });
+            return Some(unsafe { zeroed() });
         }
         unsafe {
             let removed = self.first_mut().map(|p| read(p as *mut _))?;
@@ -708,11 +708,12 @@ impl<T> SliceRingBuffer<T> {
     #[inline(always)]
     pub fn try_insert(&mut self, idx: usize, elem: T) -> Option<&T> {
         let len = self.len();
+        println!("当前长度{}", len);
         match len {
             _ if idx > len || self.is_full() => {
                 return None;
             }
-            0 => {
+            _ if idx == 0 => {
                 return self.try_push_front(elem);
             }
             _ if idx == len => {
@@ -739,13 +740,45 @@ impl<T> SliceRingBuffer<T> {
         }
     }
 
+    pub fn insert(&mut self, idx: usize, elem: T) -> &T {
+        let len = self.len();
+        assert!(idx <= len, "index outbound");
+        if !self.is_full() {
+            return unsafe { self.try_insert(idx, elem).unwrap_unchecked() };
+        }
+        match idx {
+            0 => return self.push_front(elem),
+            _ if idx == len => return self.push_back(elem),
+            _ => {}
+        }
+        if T::IS_ZST {
+            return unsafe { NonNull::dangling().as_ref() };
+        }
+        let new_buf: MirroredBuffer<T> =
+            MirroredBuffer::with_capacity(self.capacity().checked_add(1).expect("cap overflow"));
+        let src = self.as_mut_slice().as_ptr();
+        let dst = new_buf.as_ptr();
+        unsafe {
+            copy(src, dst, idx);
+            let src = src.add(idx);
+            let target = dst.add(idx);
+            copy(&elem, target, 1);
+            let dst = target.add(1);
+            copy(src, dst, len - idx);
+            self.buf = new_buf;
+            self.head = 0;
+            self.len = len + 1;
+            &*target
+        }
+    }
+
     #[inline(always)]
     pub fn remove(&mut self, idx: usize) -> T {
         assert!(idx < self.len(), "index out of bounds: the len is {} but the index is {}", idx, self.len());
         unsafe {
             if T::IS_ZST {
                 self.move_tail(-1);
-                return mem::zeroed();
+                return zeroed();
             }
             let len = self.len();
             let ptr = self.as_mut_ptr();
@@ -757,13 +790,10 @@ impl<T> SliceRingBuffer<T> {
         }
     }
 
-    // 可能会保留更多内存，由于分配需要按照分配粒度对齐，所以没有实现 reserve_exact
     #[inline(always)]
     pub fn reserve(&mut self, additional: usize) {
-        let additional = additional.checked_mul(2);
-        assert!(additional <= Some(MAX_VIRTUAL_BUF_SIZE));
-        let required_cap = self.len().checked_add(unsafe { additional.unwrap_unchecked() });
-        assert!(required_cap <= Some(MAX_VIRTUAL_BUF_SIZE));
+        let required_cap = self.len().checked_add(additional);
+        assert!(required_cap <= Some(MAX_PHYSICAL_BUF_SIZE));
         let required_cap = unsafe { required_cap.unwrap_unchecked() };
 
         let cap = self.capacity();
@@ -772,11 +802,11 @@ impl<T> SliceRingBuffer<T> {
         }
         if T::IS_ZST {
             unsafe {
-                self.buf.set_size_unchecked(required_cap);
+                self.buf.set_size_unchecked(required_cap * 2);
             }
             return;
         }
-        let new_cap = required_cap.max(cap.saturating_mul(2));
+        let new_cap = required_cap.max(cap.saturating_mul(Self::GROW_FACTOR));
         self.realloc_and_restore_part(new_cap);
     }
 
@@ -802,6 +832,9 @@ impl<T> SliceRingBuffer<T> {
     #[inline(always)]
     pub fn shrink_to_fit(&mut self) {
         if T::IS_ZST {
+            unsafe {
+                self.buf.set_size_unchecked(self.len() * 2);
+            }
             return;
         }
         let len = self.len();
@@ -809,9 +842,7 @@ impl<T> SliceRingBuffer<T> {
         if ideal_virtual_size >= self.buf.virtual_size() {
             return;
         }
-        // ideal_virtual_size 这里不太可能为0，因为 is_not_allocated 保证了 len > 0，
-        // mirrored_allocation_unit 也会返回大于0的值
-        self.realloc_and_restore_part(ideal_virtual_size);
+        self.realloc_and_restore_part(len);
     }
 
     /// 将 [0,mid)元素移动到末尾，正为左移，负值为右移
@@ -843,39 +874,44 @@ impl<T> SliceRingBuffer<T> {
 impl<T> Deref for SliceRingBuffer<T> {
     type Target = [T];
 
-    #[inline]
+    #[inline(always)]
     fn deref(&self) -> &Self::Target { self.as_slice() }
 }
 
 impl<T> DerefMut for SliceRingBuffer<T> {
-    #[inline]
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target { self.as_mut_slice() }
 }
 
 impl<T> Default for SliceRingBuffer<T> {
-    #[inline]
+    #[inline(always)]
     fn default() -> Self { Self::new() }
 }
 
 impl<T> AsRef<[T]> for SliceRingBuffer<T> {
+    #[inline(always)]
     fn as_ref(&self) -> &[T] { self }
 }
 
 impl<T> AsMut<[T]> for SliceRingBuffer<T> {
+    #[inline(always)]
     fn as_mut(&mut self) -> &mut [T] { &mut *self }
 }
 
 impl<T: PartialEq> PartialEq for SliceRingBuffer<T> {
+    #[inline(always)]
     fn eq(&self, other: &Self) -> bool { self.as_slice() == other.as_slice() }
 }
 
 impl<T: Eq> Eq for SliceRingBuffer<T> {}
 
 impl<T: PartialOrd> PartialOrd for SliceRingBuffer<T> {
+    #[inline(always)]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> { self.as_slice().partial_cmp(other.as_slice()) }
 }
 
 impl<T: Ord> Ord for SliceRingBuffer<T> {
+    #[inline(always)]
     fn cmp(&self, other: &Self) -> Ordering { self.as_slice().cmp(other.as_slice()) }
 }
 
@@ -884,7 +920,7 @@ pub struct IntoIter<T> {
 }
 
 impl<T> ExactSizeIterator for IntoIter<T> {
-    #[inline]
+    #[inline(always)]
     fn len(&self) -> usize { self.inner.len() }
 }
 
@@ -892,17 +928,17 @@ impl<T> IntoIterator for SliceRingBuffer<T> {
     type IntoIter = IntoIter<T>;
     type Item = T;
 
-    #[inline]
+    #[inline(always)]
     fn into_iter(self) -> Self::IntoIter { IntoIter { inner: self } }
 }
 
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
 
-    #[inline]
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> { self.inner.pop_front() }
 
-    #[inline]
+    #[inline(always)]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let len = self.inner.len();
         (len, Some(len))
@@ -910,15 +946,17 @@ impl<T> Iterator for IntoIter<T> {
 }
 
 impl<T> DoubleEndedIterator for IntoIter<T> {
-    #[inline]
+    #[inline(always)]
     fn next_back(&mut self) -> Option<Self::Item> { self.inner.pop_back() }
 }
 
 impl<T> From<Vec<T>> for SliceRingBuffer<T> {
+    #[inline(always)]
     fn from(vec: Vec<T>) -> Self { Self::from_iter(vec) }
 }
 
 impl<T> FromIterator<T> for SliceRingBuffer<T> {
+    #[inline(always)]
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let iterator = iter.into_iter();
         let (lower, upper) = iterator.size_hint();
@@ -931,6 +969,7 @@ impl<T> FromIterator<T> for SliceRingBuffer<T> {
 }
 
 impl<T> Extend<T> for SliceRingBuffer<T> {
+    #[inline(always)]
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let iterator = iter.into_iter();
         let (lower, upper) = iterator.size_hint();
@@ -944,6 +983,7 @@ impl<T> Extend<T> for SliceRingBuffer<T> {
 }
 
 impl<T: Clone> From<&[T]> for SliceRingBuffer<T> {
+    #[inline(always)]
     fn from(slice: &[T]) -> Self {
         let mut buffer = SliceRingBuffer::with_capacity(slice.len());
         buffer.extend(slice.iter().cloned());
@@ -952,6 +992,7 @@ impl<T: Clone> From<&[T]> for SliceRingBuffer<T> {
 }
 
 impl<T: Clone, const N: usize> From<[T; N]> for SliceRingBuffer<T> {
+    #[inline(always)]
     fn from(arr: [T; N]) -> Self {
         let mut buffer = SliceRingBuffer::with_capacity(N);
         buffer.extend(arr.iter().cloned());
@@ -1236,6 +1277,20 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_push_back_and_pop_front_zst() {
+        let mut zst_rb = SliceRingBuffer::new();
+        zst_rb.push_back(());
+        assert!(!zst_rb.is_empty());
+        assert!(!zst_rb.is_full());
+        assert_eq!(zst_rb.len(), 1);
+        assert_eq!(zst_rb.capacity(), MAX_PHYSICAL_BUF_SIZE);
+        zst_rb.pop_back();
+        assert!(zst_rb.is_empty());
+        assert_eq!(zst_rb.capacity(), MAX_PHYSICAL_BUF_SIZE);
+        assert!(!zst_rb.is_full());
+    }
+
+    #[test]
     fn test_wrap_around() {
         let mut rb = SliceRingBuffer::with_capacity(3);
         rb.push_back(1);
@@ -1367,26 +1422,34 @@ mod tests {
 
     #[test]
     fn test_from_array() {
-        let data = [1, 2, 3, 4, 5];
-        let rb = SliceRingBuffer::from(data);
+        let arr = [1, 2, 3, 4, 5];
+        let rb = SliceRingBuffer::from(arr);
         assert_eq!(rb.len(), 5);
-        assert_eq!(rb.as_slice(), &[1, 2, 3, 4, 5]);
+        assert_eq!(rb.as_slice(), &arr);
     }
 
     #[test]
     fn test_from_array_zst() {
-        let data = [(); 5];
-        let rb = SliceRingBuffer::from(data);
+        let arr = [(); 5];
+        let rb = SliceRingBuffer::from(arr);
         assert_eq!(rb.len(), 5);
-        assert_eq!(rb.as_slice(), &[(); 5]);
+        assert_eq!(rb.as_slice(), &arr);
     }
 
     #[test]
     fn test_from_slice() {
-        let data = [1, 1, 4, 5, 1, 5].as_slice();
-        let rb = SliceRingBuffer::from(data);
+        let slice = [1, 1, 4, 5, 1, 5].as_slice();
+        let rb = SliceRingBuffer::from(slice);
         assert_eq!(rb.len(), 6);
-        assert_eq!(rb.as_slice(), data);
+        assert_eq!(rb.as_slice(), slice);
+    }
+
+    #[test]
+    fn test_from_slice_zst() {
+        let slice = [(); 6].as_slice();
+        let rb = SliceRingBuffer::from(slice);
+        assert_eq!(rb.len(), 6);
+        assert_eq!(rb.as_slice(), slice);
     }
 
     #[test]
@@ -1394,7 +1457,10 @@ mod tests {
         let mut rb = SliceRingBuffer::from(vec![1, 2]);
         rb.extend(vec![3, 4, 5]);
         assert_eq!(rb.as_slice(), &[1, 2, 3, 4, 5]);
+    }
 
+    #[test]
+    fn test_extend_zst() {
         let mut rb = SliceRingBuffer::from(vec![(); 2]);
         rb.extend(vec![(); 4]);
         assert_eq!(rb.as_slice(), &[(); 6]);
@@ -1543,18 +1609,18 @@ mod tests {
         let mut zst_rb = SliceRingBuffer::from([(); 8]);
         zst_rb.append(&mut zst_rb.clone());
         assert!(!zst_rb.is_empty());
-        // assert_eq!(zst_rb.len(), 16);
+        assert_eq!(zst_rb.len(), 16);
     }
 
     #[test]
-    fn test_truncate() {
+    fn test_truncate_back() {
         let mut rb = SliceRingBuffer::from(vec![1, 2, 3, 4, 5]);
-        rb.truncate(3);
+        rb.truncate_back(3);
         assert_eq!(rb.as_slice(), &[1, 2, 3]);
-        rb.truncate(5);
+        rb.truncate_back(5);
         assert_eq!(rb.as_slice(), &[1, 2, 3]);
 
-        let mut rb = SliceRingBuffer::from_iter(0..allocation_granularity());
+        let mut rb = SliceRingBuffer::from_iter(0usize..allocation_granularity());
         rb.extend(0..allocation_granularity());
         for i in 0..allocation_granularity() {
             assert_eq!(i, rb[i])
@@ -1566,10 +1632,26 @@ mod tests {
     }
 
     #[test]
+    fn test_truncate_back_zst() {
+        let mut zst_rb = SliceRingBuffer::from([(); 96]);
+        zst_rb.truncate_back(3);
+        assert_eq!(zst_rb.as_slice(), &[(); 3])
+    }
+
+    #[test]
     fn test_remove() {
         let mut rb = SliceRingBuffer::from(vec![1, 2, 3, 4, 5]);
         assert_eq!(rb.remove(2), 3);
         assert_eq!(rb.as_slice(), &[1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn test_remove_zst() {
+        let mut zst_rb = SliceRingBuffer::from([(); 3]);
+        assert_eq!(zst_rb.remove(0), ());
+        assert_eq!(zst_rb.as_slice(), &[(), ()]);
+        zst_rb.remove(1);
+        assert_eq!(zst_rb.len(), 1);
     }
 
     #[test]
@@ -1580,6 +1662,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_remove_out_of_bounds_zst() {
+        let mut rb = SliceRingBuffer::from([(); 8]);
+        rb.remove(10);
+    }
+
+    #[test]
     fn test_swap_remove() {
         let mut rb = SliceRingBuffer::from(vec![1, 2, 3, 4, 5]);
         assert_eq!(rb.swap_remove(1), Some(2));
@@ -1587,7 +1676,14 @@ mod tests {
     }
 
     #[test]
-    fn test_insert() {
+    fn test_swap_remove_zst() {
+        let mut zst_rb = SliceRingBuffer::from([(); 8]);
+        zst_rb.swap_remove(3);
+        assert_eq!(zst_rb.len(), 7);
+    }
+
+    #[test]
+    fn test_try_insert() {
         let mut rb = SliceRingBuffer::with_capacity(5);
         rb.push_back(1);
         rb.push_back(2);
@@ -1597,14 +1693,56 @@ mod tests {
         assert!(rb.try_insert(2, 3).is_some());
         assert_eq!(rb.as_slice(), &[1, 2, 3, 4, 5]);
     }
+    #[test]
+    fn test_try_insert_zst() {
+        let mut rb = SliceRingBuffer::from([(); 5]);
+        assert!(rb.try_insert(2, ()).is_none());
+        assert_eq!(rb.len(), 5);
+    }
+
+    #[test]
+    fn test_insert() {
+        let ag = allocation_granularity();
+        let mut rb = SliceRingBuffer::from(vec![false; ag]);
+        rb.insert(2, true);
+        assert!(rb.is_full().not());
+        assert_eq!(rb.swap_remove(2), Some(true));
+        assert_eq!(rb.swap_remove(0), Some(false));
+        assert_eq!(rb.swap_remove(rb.len() - 1), Some(false));
+        assert_eq!(rb.capacity(), 2 * ag);
+    }
+
+    #[test]
+    fn test_insert_zst() {
+        let ag = allocation_granularity();
+        let mut rb = SliceRingBuffer::from(vec![(); ag]);
+        rb.insert(2, ());
+        assert!(rb.is_full());
+        assert_eq!(rb.swap_remove(2), Some(()));
+        assert_eq!(rb.capacity(), ag);
+    }
 
     #[test]
     fn test_shrink_to_fit() {
         let mut rb = SliceRingBuffer::with_capacity(20);
         rb.extend(0..5);
         rb.shrink_to_fit();
-        assert_eq!(rb.capacity(), 0x4000);
+        assert_eq!(rb.capacity(), allocation_granularity() / size_of::<i32>());
         assert_eq!(rb.as_slice(), &[0, 1, 2, 3, 4]);
+        let mut rb = SliceRingBuffer::with_capacity(2 * allocation_granularity());
+        rb.push_back(1);
+        rb.shrink_to_fit();
+        assert_eq!(rb.capacity(), allocation_granularity() / size_of::<i32>());
+    }
+
+    #[test]
+    fn test_shrink_to_fit_zst() {
+        let mut rb = SliceRingBuffer::with_capacity(20);
+        rb.extend([(); 5]);
+        assert_eq!(rb.len(), 5);
+        assert_eq!(rb.capacity(), 20);
+        rb.shrink_to_fit();
+        assert_eq!(rb.capacity(), 5);
     }
 
     #[test]
@@ -1617,51 +1755,12 @@ mod tests {
     }
 
     #[test]
-    fn test_slice_ring_buffer_with_capacity() {
-        let rb: SliceRingBuffer<i32> = SliceRingBuffer::with_capacity(10);
+    fn test_slice_ring_buffer_empty_zst() {
+        let rb: SliceRingBuffer<()> = SliceRingBuffer::new();
         assert!(rb.is_empty());
         assert_eq!(rb.len(), 0);
-        assert!(rb.capacity() >= 10);
+        assert_eq!(rb.capacity(), MAX_PHYSICAL_BUF_SIZE);
         assert_eq!(rb.as_slice(), &[]);
-    }
-
-    #[test]
-    fn test_push_back_and_front() {
-        let mut rb = SliceRingBuffer::new();
-        rb.push_back(1);
-        rb.push_back(2);
-        rb.push_back(3);
-
-        assert_eq!(rb.len(), 3);
-        assert_eq!(rb.front(), Some(&1));
-        assert_eq!(rb.back(), Some(&3));
-        assert_eq!(rb.as_slice(), &[1, 2, 3]);
-    }
-
-    #[test]
-    fn test_push_front_and_back() {
-        let mut rb = SliceRingBuffer::new();
-        rb.push_front(1);
-        rb.push_front(2);
-        rb.push_front(3);
-
-        assert_eq!(rb.len(), 3);
-        assert_eq!(rb.front(), Some(&3));
-        assert_eq!(rb.back(), Some(&1));
-        assert_eq!(rb.as_slice(), &[3, 2, 1]);
-    }
-
-    #[test]
-    fn test_pop_operations() {
-        let mut rb = SliceRingBuffer::from(vec![1, 2, 3, 4, 5]);
-
-        assert_eq!(rb.pop_front(), Some(1));
-        assert_eq!(rb.len(), 4);
-
-        assert_eq!(rb.pop_back(), Some(5));
-        assert_eq!(rb.len(), 3);
-
-        assert_eq!(rb.as_slice(), &[2, 3, 4]);
     }
 
     #[test]
@@ -1677,36 +1776,53 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_index_out_of_bounds() {
-        let rb: SliceRingBuffer<i32> = SliceRingBuffer::from(vec![1, 2, 3]);
-        let _ = rb[5];
-    }
-
-    #[test]
     fn test_reserve_and_shrink() {
         let mut rb = SliceRingBuffer::with_capacity(5);
         rb.extend(0..5);
         assert_eq!(rb.len(), 5);
-        assert!(rb.capacity() >= 5);
+        assert_eq!(rb.capacity(), allocation_granularity() / size_of::<i32>());
 
         rb.reserve(10);
-        assert!(rb.capacity() >= 10);
+        assert_eq!(rb.capacity(), allocation_granularity() / size_of::<i32>());
 
         rb.shrink_to_fit();
-        // After shrinking, capacity should be reasonable
-        assert!(rb.capacity() >= rb.len());
+        assert_eq!(rb.capacity(), allocation_granularity() / size_of::<i32>());
     }
 
     #[test]
-    fn test_slice_ring_buffer_zst() {
-        // Test SliceRingBuffer with Zero Sized Types
+    fn test_reserve_and_shrink_zst() {
         let mut rb: SliceRingBuffer<()> = SliceRingBuffer::new();
-        rb.push_back(());
-        rb.push_back(());
-        assert_eq!(rb.len(), 2);
-        assert_eq!(rb.pop_front(), Some(()));
-        assert_eq!(rb.len(), 1);
+        assert_eq!(rb.capacity(), MAX_PHYSICAL_BUF_SIZE);
+
+        rb.reserve(10);
+        assert_eq!(rb.capacity(), MAX_PHYSICAL_BUF_SIZE);
+
+        rb.shrink_to_fit();
+        assert_eq!(rb.capacity(), 0);
+    }
+
+    #[test]
+    fn test_reserve() {
+        let mut rb = SliceRingBuffer::from([false; 10]);
+        rb.reserve(allocation_granularity() * 2);
+        assert_eq!(rb.capacity(), allocation_granularity() * 3);
+        rb.shrink_to_fit();
+        assert_eq!(rb.capacity(), allocation_granularity());
+
+        let mut rb = SliceRingBuffer::from(vec![false; allocation_granularity()]);
+        rb.reserve(allocation_granularity() / 2);
+        assert_eq!(rb.capacity(), allocation_granularity() * 2);
+    }
+
+    #[test]
+    fn test_reserve_zst() {
+        let mut rb = SliceRingBuffer::from([(); 10]);
+        rb.reserve(32);
+        assert_eq!(rb.capacity(), 42);
+        rb.shrink_to_fit();
+        assert_eq!(rb.capacity(), 10);
+        rb.reserve(5);
+        assert_eq!(rb.capacity(), 15);
     }
 
     #[test]
@@ -1730,6 +1846,14 @@ mod tests {
 
         // Test out of bounds
         assert_eq!(rb.get_mut(3), None);
+    }
+
+    #[test]
+    fn test_get_and_get_mut_zst() {
+        let rb = SliceRingBuffer::from([(); 10]);
+        assert!(rb.get(3).is_some());
+        assert!(rb.get(0).is_some());
+        assert!(rb.get(10).is_none())
     }
 
     // #[test]
