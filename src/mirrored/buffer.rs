@@ -41,8 +41,9 @@ pub(crate) struct MirroredBuffer<T> {
 
 impl<T> MirroredBuffer<T> {
     #[inline(always)]
-    pub(crate) unsafe fn set_size_unchecked(&mut self, value: usize) {
-        self.size = unsafe { Size::new_unchecked(value) };
+    pub(crate) unsafe fn set_size_unchecked(&mut self, v_cap: usize) {
+        debug_assert!(v_cap <= MAX_VIRTUAL_BUF_SIZE);
+        self.size = unsafe { Size::new_unchecked(v_cap) };
     }
 
     /// Creates a new, empty `MirroredBuffer` without allocating memory.
