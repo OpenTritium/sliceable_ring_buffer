@@ -1,8 +1,7 @@
 //! Non-racy linux-specific mirrored memory allocation.
 use libc::{
-    c_char, c_int, c_long, c_uint, c_void, close, ftruncate, mkstemp, mmap,
-    munmap, off_t, size_t, sysconf, unlink, ENOSYS, MAP_FAILED, MAP_FIXED,
-    MAP_SHARED, PROT_READ, PROT_WRITE, _SC_PAGESIZE,
+    _SC_PAGESIZE, ENOSYS, MAP_FAILED, MAP_FIXED, MAP_SHARED, PROT_READ, PROT_WRITE, c_char, c_int, c_long, c_uint,
+    c_void, close, ftruncate, mkstemp, mmap, munmap, off_t, size_t, sysconf, unlink,
 };
 
 #[cfg(any(target_os = "android", target_os = "openbsd"))]
@@ -10,14 +9,14 @@ use libc::__errno;
 #[cfg(not(any(target_os = "android", target_os = "openbsd")))]
 use libc::__errno_location;
 
-use super::{ptr, AllocError};
+use super::{AllocError, ptr};
 
 /// [`memfd_create`] - create an anonymous file
 ///
 /// [`memfd_create`]: http://man7.org/linux/man-pages/man2/memfd_create.2.html
 #[cfg(not(target_os = "openbsd"))]
 fn memfd_create(name: *const c_char, flags: c_uint) -> c_long {
-    use libc::{syscall, SYS_memfd_create};
+    use libc::{SYS_memfd_create, syscall};
 
     unsafe { syscall(SYS_memfd_create, name, flags) }
 }
@@ -31,9 +30,7 @@ fn memfd_create(_name: *mut c_char, _flags: c_uint) -> c_long {
 /// Returns the size of a memory allocation unit.
 ///
 /// In Linux-like systems this equals the page-size.
-pub fn allocation_granularity() -> usize {
-    unsafe { sysconf(_SC_PAGESIZE) as usize }
-}
+pub fn allocation_granularity() -> usize { unsafe { sysconf(_SC_PAGESIZE) as usize } }
 
 /// Reads `errno`.
 fn errno() -> c_int {
@@ -72,8 +69,7 @@ pub fn allocate_mirrored(size: usize) -> Result<*mut u8, AllocError> {
 
         // create temporary file
         let mut fname = *b"/tmp/slice_deque_fileXXXXXX\0";
-        let mut fd: c_long =
-            memfd_create(fname.as_mut_ptr() as *mut c_char, 0);
+        let mut fd: c_long = memfd_create(fname.as_mut_ptr() as *mut c_char, 0);
         if fd == -1 && errno() == ENOSYS {
             // memfd_create is not implemented, use mkstemp instead:
             fd = c_long::from(mkstemp(fname.as_mut_ptr() as *mut c_char));
@@ -96,14 +92,7 @@ pub fn allocate_mirrored(size: usize) -> Result<*mut u8, AllocError> {
         };
 
         // mmap memory
-        let ptr = mmap(
-            ptr::null_mut(),
-            size,
-            PROT_READ | PROT_WRITE,
-            MAP_SHARED,
-            fd,
-            0,
-        );
+        let ptr = mmap(ptr::null_mut(), size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if ptr == MAP_FAILED {
             print_error("@first: mmap failed");
             if close(fd) == -1 {
@@ -161,11 +150,7 @@ pub unsafe fn deallocate_mirrored(ptr: *mut u8, size: usize) {
 /// Prints last os error at `location`.
 #[cfg(all(debug_assertions, feature = "use_std"))]
 fn print_error(location: &str) {
-    eprintln!(
-        "Error at {}: {}",
-        location,
-        ::std::io::Error::last_os_error()
-    );
+    eprintln!("Error at {}: {}", location, ::std::io::Error::last_os_error());
 }
 
 /// Prints last os error at `location`.

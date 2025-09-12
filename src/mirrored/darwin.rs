@@ -4,16 +4,18 @@
 
 use super::mem;
 
-use mach::boolean::boolean_t;
-use mach::kern_return::*;
-use mach::mach_types::mem_entry_name_port_t;
-use mach::memory_object_types::{memory_object_offset_t, memory_object_size_t};
-use mach::traps::mach_task_self;
-use mach::vm::{mach_make_memory_entry_64, mach_vm_allocate, mach_vm_deallocate, mach_vm_remap};
-use mach::vm_inherit::VM_INHERIT_NONE;
-use mach::vm_prot::{vm_prot_t, VM_PROT_READ, VM_PROT_WRITE};
-use mach::vm_statistics::{VM_FLAGS_ANYWHERE, VM_FLAGS_FIXED};
-use mach::vm_types::mach_vm_address_t;
+use mach::{
+    boolean::boolean_t,
+    kern_return::*,
+    mach_types::mem_entry_name_port_t,
+    memory_object_types::{memory_object_offset_t, memory_object_size_t},
+    traps::mach_task_self,
+    vm::{mach_make_memory_entry_64, mach_vm_allocate, mach_vm_deallocate, mach_vm_remap},
+    vm_inherit::VM_INHERIT_NONE,
+    vm_prot::{VM_PROT_READ, VM_PROT_WRITE, vm_prot_t},
+    vm_statistics::{VM_FLAGS_ANYWHERE, VM_FLAGS_FIXED},
+    vm_types::mach_vm_address_t,
+};
 use mach2 as mach;
 
 use super::AllocError;
@@ -24,9 +26,7 @@ const VM_FLAGS_OVERWRITE: ::libc::c_int = 0x4000_i32;
 /// Returns the size of an allocation unit.
 ///
 /// In `MacOSX` this equals the page size.
-pub fn allocation_granularity() -> usize {
-    unsafe { mach::vm_page_size::vm_page_size as usize }
-}
+pub fn allocation_granularity() -> usize { unsafe { mach::vm_page_size::vm_page_size as usize } }
 
 /// Allocates an uninitialzied buffer that holds `size` bytes, where
 /// the bytes in range `[0, size / 2)` are mirrored into the bytes in
@@ -57,12 +57,8 @@ pub fn allocate_mirrored(size: usize) -> Result<*mut u8, AllocError> {
 
         // Allocate memory to hold the whole buffer:
         let mut addr: mach_vm_address_t = 0;
-        let r: kern_return_t = mach_vm_allocate(
-            task,
-            &mut addr as *mut mach_vm_address_t,
-            size as u64,
-            VM_FLAGS_ANYWHERE,
-        );
+        let r: kern_return_t =
+            mach_vm_allocate(task, &mut addr as *mut mach_vm_address_t, size as u64, VM_FLAGS_ANYWHERE);
         if r != KERN_SUCCESS {
             // If the first allocation fails, there is nothing to
             // deallocate and we can just fail to allocate:
