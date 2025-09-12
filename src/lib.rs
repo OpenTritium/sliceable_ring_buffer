@@ -10,11 +10,12 @@ use crate::mirrored::MAX_PHYSICAL_BUF_SIZE;
 use core::{
     cmp::Ordering,
     iter::{FromIterator, FusedIterator},
-    mem::{MaybeUninit, SizedTypeProperties, replace, zeroed},
-    ops::{Bound, Deref, DerefMut, Neg, Not, RangeBounds},
+    marker::PhantomData,
+    mem::{MaybeUninit, SizedTypeProperties, needs_drop, replace, zeroed},
+    ops::{Bound, Deref, DerefMut, Neg, RangeBounds},
     ptr::{NonNull, copy, copy_nonoverlapping, drop_in_place, read, slice_from_raw_parts_mut, write},
 };
-use mirrored::{MAX_VIRTUAL_BUF_SIZE, MirroredBuffer, mirrored_allocation_unit};
+use mirrored::{MirroredBuffer, mirrored_allocation_unit};
 use num::Zero;
 
 #[derive(Debug, Clone)]
@@ -24,129 +25,18 @@ pub struct SliceRingBuffer<T> {
     len: usize,
 }
 
-#[derive(Debug)]
-pub struct Drain<'a, T> {
-    deque: &'a mut SliceRingBuffer<T>,
-    drain_start: usize,
-    drain_len: usize,
-    processed: usize,
-}
-
-impl<'a, T> Drop for Drain<'a, T> {
-    fn drop(&mut self) {
-        if T::IS_ZST {
-            self.deque.len -= self.drain_len;
-            return;
-        }
-
-        let capacity = self.deque.capacity();
-
-        // Drop any remaining elements
-        while self.processed < self.drain_len {
-            let actual_idx = (self.drain_start + self.processed) % capacity;
-            unsafe {
-                let elem = self.deque.buf.virtual_uninit_slice_mut_at(actual_idx, 1).get_unchecked_mut(0);
-                drop_in_place(elem.as_mut_ptr());
-            }
-            self.processed += 1;
-        }
-
-        // Shift elements after the drained range to fill the gap
-        let tail_start = (self.drain_start + self.drain_len) % capacity;
-        let tail_len = self.deque.len - (self.drain_len + (self.drain_start - self.deque.head()) % capacity);
-
-        if tail_len > 0 {
-            // Handle wrap-around when copying
-            let mut copied = 0;
-            while copied < tail_len {
-                let src_idx = (tail_start + copied) % capacity;
-                let dst_idx = (self.drain_start + copied) % capacity;
-
-                unsafe {
-                    let src = self.deque.buf.virtual_uninit_slice_at(src_idx, 1).as_ptr();
-                    let dst = self.deque.buf.virtual_uninit_slice_mut_at(dst_idx, 1).as_mut_ptr();
-                    core::ptr::copy_nonoverlapping(src, dst, 1);
-                }
-
-                copied += 1;
-            }
-        }
-
-        // Update deque length
-        self.deque.len -= self.drain_len;
-    }
-}
-
-impl<'a, T> Iterator for Drain<'a, T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<T> {
-        if self.processed >= self.drain_len {
-            return None;
-        }
-
-        if T::IS_ZST {
-            self.processed += 1;
-            return Some(unsafe { zeroed() });
-        }
-
-        let capacity = self.deque.capacity();
-        let actual_idx = (self.drain_start + self.processed) % capacity;
-
-        unsafe {
-            let elem = self.deque.buf.virtual_uninit_slice_at(actual_idx, 1).get_unchecked(0);
-            let result = core::ptr::read(elem.assume_init_ref());
-            self.processed += 1;
-            Some(result)
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.drain_len - self.processed;
-        (remaining, Some(remaining))
-    }
-}
-
-impl<'a, T> DoubleEndedIterator for Drain<'a, T> {
-    fn next_back(&mut self) -> Option<T> {
-        if self.processed >= self.drain_len {
-            return None;
-        }
-
-        if T::IS_ZST {
-            self.drain_len -= 1;
-            return Some(unsafe { zeroed() });
-        }
-
-        let capacity = self.deque.capacity();
-        let actual_idx = (self.drain_start + self.drain_len - 1) % capacity;
-
-        unsafe {
-            let elem = self.deque.buf.virtual_uninit_slice_at(actual_idx, 1).get_unchecked(0);
-            let result = core::ptr::read(elem.assume_init_ref());
-            self.drain_len -= 1;
-            Some(result)
-        }
-    }
-}
-
-impl<'a, T> ExactSizeIterator for Drain<'a, T> {}
-
-impl<'a, T> FusedIterator for Drain<'a, T> {}
-
 impl<T> SliceRingBuffer<T> {
     const GROW_FACTOR: usize = 2;
+    pub const MAX_CAPACITY: usize = MAX_PHYSICAL_BUF_SIZE;
 
-    /// 创建一个容量为0的容器
     #[inline(always)]
     pub fn new() -> Self { Self::with_capacity(if T::IS_ZST { MAX_PHYSICAL_BUF_SIZE } else { 0 }) }
 
     /// 分配多少个物理元素的容量
     #[inline(always)]
     pub fn with_capacity(cap: usize) -> Self {
-        let v_cap = cap * 2;
-        assert!(v_cap <= MAX_VIRTUAL_BUF_SIZE);
-        Self { buf: MirroredBuffer::with_capacity(v_cap), head: 0, len: 0 }
+        assert!(cap <= MAX_PHYSICAL_BUF_SIZE);
+        Self { buf: MirroredBuffer::with_capacity(cap), head: 0, len: 0 }
     }
 
     /// 物理容量
@@ -162,7 +52,7 @@ impl<T> SliceRingBuffer<T> {
     }
 
     #[inline(always)]
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool { self.len().is_zero() }
 
     #[inline(always)]
     pub fn is_full(&self) -> bool {
@@ -176,7 +66,7 @@ impl<T> SliceRingBuffer<T> {
     #[inline(always)]
     pub fn head(&self) -> usize {
         let head = self.head;
-        debug_assert!(head == 0 || head < self.capacity());
+        debug_assert!(head.is_zero() || head < self.capacity());
         head
     }
 
@@ -229,7 +119,7 @@ impl<T> SliceRingBuffer<T> {
         self.buf.virtual_uninit_slice_mut_at(uninit_start, uninit_len)
     }
 
-    /// 在第一段虚拟地址(0..p_cap)内环绕移动头指针
+    /// 在第一段虚拟地址(0..p_cap)内环绕移动头指针，副作用是会更新长度
     #[inline(always)]
     pub fn move_head(&mut self, mv: isize) {
         let cap = self.capacity();
@@ -242,7 +132,7 @@ impl<T> SliceRingBuffer<T> {
         self.len = new_len;
     }
 
-    // 仅仅增加长度
+    /// 仅仅增加长度
     #[inline(always)]
     pub fn move_tail(&mut self, mv: isize) {
         let len = self.len() as isize;
@@ -348,95 +238,6 @@ impl<T> SliceRingBuffer<T> {
         }
     }
 
-    /// Retains only the elements specified by the predicate.
-    ///
-    /// In other words, remove all elements `e` such that `f(&e)` returns `false`.
-    /// This method operates in place, visiting each element exactly once in the
-    /// original order, and preserves the order of the retained elements.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
-    ///
-    /// let mut buf = SliceRingBuffer::new();
-    /// buf.extend(&[1, 2, 3, 4]);
-    /// buf.retain(|&x| x % 2 == 0);
-    /// assert_eq!(buf.as_slice(), &[2, 4]);
-    /// ```
-    ///
-    /// Because the elements are visited exactly once in the order of the original
-    /// slice, the following code is equivalent:
-    ///
-    /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
-    ///
-    /// let mut buf = SliceRingBuffer::new();
-    /// buf.extend(&[1, 2, 3, 4, 5]);
-    /// let mut taken = 0;
-    /// buf.retain(|&x| {
-    ///     taken += 1;
-    ///     x % 2 == 0
-    /// });
-    /// assert_eq!(buf.as_slice(), &[2, 4]);
-    /// assert_eq!(taken, 5);
-    /// ```
-    pub fn retain<F>(&mut self, mut f: F)
-    where
-        F: FnMut(&T) -> bool,
-    {
-        if T::IS_ZST {
-            // For ZSTs, we just need to count how many elements satisfy the predicate
-            let mut new_len = 0;
-            for i in 0..self.len() {
-                // SAFETY: i is within bounds
-                if f(unsafe { NonNull::dangling().as_ref() }) {
-                    new_len += 1;
-                }
-            }
-            self.len = new_len;
-            return;
-        }
-
-        let len = self.len();
-        let head = self.head();
-        let capacity = self.capacity();
-
-        let mut read_idx = head;
-        let mut write_idx = head;
-        let mut processed = 0;
-
-        while processed < len {
-            let read_actual_idx = (read_idx + processed) % capacity;
-            let write_actual_idx = (write_idx + self.len) % capacity; // self.len will be adjusted during the process
-
-            // SAFETY: read_actual_idx is within bounds
-            let should_retain =
-                unsafe { f(self.buf.virtual_uninit_slice_at(read_actual_idx, 1).get_unchecked(0).assume_init_ref()) };
-
-            if should_retain {
-                if read_actual_idx != write_actual_idx {
-                    // SAFETY: both indices are within bounds
-                    unsafe {
-                        let src = self.buf.virtual_uninit_slice_at(read_actual_idx, 1).as_ptr();
-                        let dst = self.buf.virtual_uninit_slice_mut_at(write_actual_idx, 1).as_mut_ptr();
-                        core::ptr::copy_nonoverlapping(src, dst, 1);
-                    }
-                }
-                self.len += 1;
-                write_idx += 1;
-            } else {
-                // SAFETY: The element will not be read again, so we can drop it
-                unsafe {
-                    let elem = self.buf.virtual_uninit_slice_mut_at(read_actual_idx, 1).get_unchecked_mut(0);
-                    core::ptr::drop_in_place(elem.as_mut_ptr());
-                }
-            }
-
-            processed += 1;
-        }
-    }
-
     /// 禁止 ZST 调用此函数
     fn realloc_and_restore_part(&mut self, new_p_cap: usize) {
         debug_assert!(new_p_cap <= MAX_PHYSICAL_BUF_SIZE);
@@ -496,27 +297,25 @@ impl<T> SliceRingBuffer<T> {
         R: RangeBounds<usize>,
     {
         // Both `start` and `end` are relative to the front of the deque
+        use Bound::*;
         let len = self.len();
         let start = match range.start_bound() {
-            Bound::Included(&n) => n,
-            Bound::Excluded(&n) => n + 1,
-            Bound::Unbounded => 0,
+            Included(&n) => n,
+            Excluded(&n) => n + 1,
+            Unbounded => 0,
         };
         let end = match range.end_bound() {
-            Bound::Included(&n) => n + 1,
-            Bound::Excluded(&n) => n,
-            Bound::Unbounded => len,
+            Included(&n) => n + 1,
+            Excluded(&n) => n,
+            Unbounded => len,
         };
-
         assert!(start <= end, "drain lower bound was too large");
         assert!(end <= len, "drain upper bound was too large");
-
         let drain_len = end - start;
-        let head = self.head();
-        let capacity = self.capacity();
-        let drain_start = (head + start) % capacity;
-
-        Drain { deque: self, drain_start, drain_len, processed: 0 }
+        let new_len = self.len - drain_len;
+        let drain_start = (self.head() + start) % self.capacity();
+        self.len = drain_start;
+        Drain { drain_len, head: 0, remaining: drain_len, new_len, inner: NonNull::from(self), _marker: PhantomData }
     }
 
     #[inline(always)]
@@ -681,7 +480,7 @@ impl<T> SliceRingBuffer<T> {
                 another.len = prev_len;
             }
         }
-        self.len -= prev_len;
+        self.move_head(prev_len as isize);
         another
     }
 
@@ -708,12 +507,11 @@ impl<T> SliceRingBuffer<T> {
     #[inline(always)]
     pub fn try_insert(&mut self, idx: usize, elem: T) -> Option<&T> {
         let len = self.len();
-        println!("当前长度{}", len);
         match len {
             _ if idx > len || self.is_full() => {
                 return None;
             }
-            _ if idx == 0 => {
+            _ if idx.is_zero() => {
                 return self.try_push_front(elem);
             }
             _ if idx == len => {
@@ -851,18 +649,17 @@ impl<T> SliceRingBuffer<T> {
         if T::IS_ZST {
             return;
         }
-        if self.is_empty() {
-            panic!("call rotate while this is empty");
-        }
+        assert!(!self.is_empty(), "call rotate while this is empty");
         // 有一个特例，当元素刚好填满的时候不需要拷贝就可以衔接到被循环的部分
+        // 1 2 3 4 5 1 2 3 4 5
+        //
         if self.is_full() {
-            self.move_head(mv);
-            self.move_tail(mv);
+            self.head = (self.head() as isize + mv).rem_euclid(self.capacity() as isize) as usize;
             return;
         }
         let idx = mv.rem_euclid(self.len() as isize) as usize;
         // 比如 刚好要移动 len 或 -len 就相当于没有移动
-        if idx == 0 {
+        if idx.is_zero() {
             return;
         }
         self[..idx].reverse();
@@ -915,6 +712,7 @@ impl<T: Ord> Ord for SliceRingBuffer<T> {
     fn cmp(&self, other: &Self) -> Ordering { self.as_slice().cmp(other.as_slice()) }
 }
 
+#[derive(Debug)]
 pub struct IntoIter<T> {
     inner: SliceRingBuffer<T>,
 }
@@ -949,6 +747,115 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
     #[inline(always)]
     fn next_back(&mut self) -> Option<Self::Item> { self.inner.pop_back() }
 }
+
+impl<T> FusedIterator for IntoIter<T> {}
+
+unsafe impl<T: Send> Send for IntoIter<T> {}
+
+unsafe impl<T: Sync> Sync for IntoIter<T> {}
+
+#[derive(Debug)]
+pub struct Drain<'a, T> {
+    // drain_start is stored as inner.len, restore when drain was dropped
+    drain_len: usize,
+    head: usize,
+    remaining: usize,
+    new_len: usize,
+    inner: NonNull<SliceRingBuffer<T>>,
+    _marker: PhantomData<&'a T>, // Needed to make Drain covariant over T
+}
+// origin_len = drain_len + new_len
+impl<T> Drain<'_, T> {
+    #[inline(always)]
+    fn move_head_forward(&mut self, mv: usize) {
+        self.head += mv;
+        self.remaining -= mv;
+    }
+
+    #[inline(always)]
+    fn move_tail_backward(&mut self, mv: usize) { self.remaining -= mv; }
+}
+
+impl<'a, T> Drop for Drain<'a, T> {
+    fn drop(&mut self) {
+        let inner = unsafe { self.inner.as_mut() };
+        if T::IS_ZST || self.drain_len.is_zero() {
+            inner.len = self.new_len;
+            return;
+        }
+        let drain_start = inner.len();
+        let drop_start = drain_start + self.head;
+        let drop_len = self.remaining;
+        if needs_drop::<T>() && !drop_len.is_zero() {
+            unsafe {
+                drop_in_place(self.inner.as_mut().as_mut_slice().get_unchecked_mut(drop_start..drop_start + drop_len))
+            }
+        }
+        use Ordering::*;
+        // 相对 head 位置
+        let front_len = drain_start;
+        let back_len = self.new_len - drain_start; // origin_len(drain_len + new_len) - drain_len - drain_start
+        let ptr = unsafe { inner.buf.as_ptr().add(inner.head()) };
+        match back_len.cmp(&front_len) {
+            Less | Equal => {
+                unsafe {
+                    let dst = ptr.add(drain_start);
+                    let src = dst.add(self.drain_len) as *const _;
+                    copy_nonoverlapping(src, dst, back_len);
+                    inner.len = self.new_len;
+                };
+            }
+            Greater => unsafe {
+                let src = ptr as *const _;
+                let dst = ptr.add(self.drain_len);
+                copy_nonoverlapping(src, dst, front_len);
+                inner.head += self.drain_len;
+                inner.len = self.new_len;
+            },
+        }
+    }
+}
+
+impl<'a, T> Iterator for Drain<'a, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        if self.remaining.is_zero() {
+            return None;
+        }
+        if T::IS_ZST {
+            self.move_head_forward(1);
+            return Some(unsafe { zeroed() });
+        }
+        let drain_start = unsafe { self.inner.as_ref().len() };
+        let pos = unsafe { self.inner.as_ref().head() } + drain_start + self.head;
+        let target = unsafe { self.inner.as_mut().buf.get_unchecked_mut(pos) };
+        self.move_head_forward(1);
+        Some(unsafe { target.assume_init_read() })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) { (self.remaining, Some(self.remaining)) }
+}
+
+impl<'a, T> DoubleEndedIterator for Drain<'a, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.remaining.is_zero() {
+            return None;
+        }
+        if T::IS_ZST {
+            self.move_tail_backward(1);
+            return Some(unsafe { zeroed() });
+        }
+        let drain_start = unsafe { self.inner.as_ref().len() };
+        let pos = unsafe { self.inner.as_ref().head() } + drain_start + self.head + self.remaining - 1;
+        let target = unsafe { self.inner.as_mut().buf.get_unchecked_mut(pos) };
+        self.move_tail_backward(1);
+        Some(unsafe { target.assume_init_read() })
+    }
+}
+impl<'a, T> ExactSizeIterator for Drain<'a, T> {}
+
+impl<'a, T> FusedIterator for Drain<'a, T> {}
 
 impl<T> From<Vec<T>> for SliceRingBuffer<T> {
     #[inline(always)]
@@ -1016,11 +923,7 @@ mod tests {
     use crate::mirrored::allocation_granularity;
 
     use super::*;
-    use core::{
-        iter::{self},
-        ops::Not,
-        sync::atomic::AtomicUsize,
-    };
+    use core::{iter, ops::Not, sync::atomic::AtomicUsize};
     use num::Integer;
     use std::rc::Rc;
 
@@ -1856,42 +1759,359 @@ mod tests {
         assert!(rb.get(10).is_none())
     }
 
-    // #[test]
-    // fn test_retain() {
-    //     let mut rb = SliceRingBuffer::new();
-    //     rb.extend(&[1, 2, 3, 4, 5]);
+    #[test]
+    fn test_drain_middle() {
+        let mut buf = SliceRingBuffer::from_iter(0..6); // [0, 1, 2, 3, 4, 5]
+        let drained: Vec<_> = buf.drain(2..4).collect(); // Drain [2, 3]
 
-    //     rb.retain(|&x| x % 2 == 0);
-    //     assert_eq!(rb.as_slice(), &[2, 4]);
-    // }
+        assert_eq!(drained, vec![2, 3]);
+        assert_eq!(buf.as_slice(), &[0, 1, 4, 5]);
+        assert_eq!(buf.len(), 4);
+    }
 
-    // #[test]
-    // fn test_drain() {
-    //     let mut rb = SliceRingBuffer::new();
-    //     rb.extend(&[1, 2, 3, 4, 5]);
+    #[test]
+    fn test_drain_all() {
+        let mut buf = SliceRingBuffer::from_iter(0..5);
+        let drained: Vec<_> = buf.drain(..).collect();
 
-    //     let drained: Vec<_> = rb.drain(1..4).collect();
-    //     assert_eq!(drained, &[2, 3, 4]);
-    //     assert_eq!(rb.as_slice(), &[1, 5]);
-    // }
+        assert_eq!(drained, vec![0, 1, 2, 3, 4]);
+        assert!(buf.is_empty());
+    }
 
-    // #[test]
-    // fn test_drain_full() {
-    //     let mut rb = SliceRingBuffer::new();
-    //     rb.extend(&[1, 2, 3, 4, 5]);
+    #[test]
+    fn test_drain_from_start() {
+        let mut buf = SliceRingBuffer::from_iter(0..5);
+        let drained: Vec<_> = buf.drain(..2).collect(); // Drain [0, 1]
 
-    //     let drained: Vec<_> = rb.drain(..).collect();
-    //     assert_eq!(drained, &[1, 2, 3, 4, 5]);
-    //     assert!(rb.is_empty());
-    // }
+        assert_eq!(drained, vec![0, 1]);
+        assert_eq!(buf.as_slice(), &[2, 3, 4]);
+    }
 
-    // #[test]
-    // fn test_drain_back() {
-    //     let mut rb = SliceRingBuffer::new();
-    //     rb.extend(&[1, 2, 3, 4, 5]);
+    #[test]
+    fn test_drain_to_end() {
+        let mut buf = SliceRingBuffer::from_iter(0..5);
+        let drained: Vec<_> = buf.drain(3..).collect(); // Drain [3, 4]
 
-    //     let drained: Vec<_> = rb.drain(2..).collect();
-    //     assert_eq!(drained, &[3, 4, 5]);
-    //     assert_eq!(rb.as_slice(), &[1, 2]);
-    // }
+        assert_eq!(drained, vec![3, 4]);
+        assert_eq!(buf.as_slice(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn test_drain_empty_range() {
+        let mut buf = SliceRingBuffer::from_iter(0..3);
+        let drained: Vec<_> = buf.drain(1..1).collect();
+
+        assert!(drained.is_empty());
+        assert_eq!(buf.as_slice(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn test_drain_drop_incomplete_move_back() {
+        // 测试 back_len <= front_len 的情况，移动后面的元素
+        let mut buf = SliceRingBuffer::from_iter(0..10); // [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+        // Drain 2..5 -> [2, 3, 4]. front_len = 2, back_len = 5. back_len > front_len
+        // 这里应该是移动前面的元素
+        {
+            let mut drainer = buf.drain(2..5);
+            assert_eq!(drainer.next(), Some(2));
+            // 迭代器在这里被 drop，剩余的 [3, 4] 会被清理
+        }
+
+        // 最终结果应该是移除了 [2, 3, 4]
+        assert_eq!(buf.as_slice(), &[0, 1, 5, 6, 7, 8, 9]);
+        assert_eq!(buf.len(), 7);
+    }
+
+    #[test]
+    fn test_drain_drop_incomplete_move_front() {
+        // 测试 back_len > front_len 的情况，移动前面的元素
+        let mut buf = SliceRingBuffer::from_iter(0..10); // [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+        // Drain 7..9 -> [7, 8]. front_len = 7, back_len = 1. front_len > back_len
+        {
+            let mut drainer = buf.drain(7..9);
+            assert_eq!(drainer.next(), Some(7));
+            // 迭代器在这里被 drop，剩余的 [8] 会被清理
+        }
+
+        // 最终结果应该是移除了 [7, 8]
+        assert_eq!(buf.as_slice(), &[0, 1, 2, 3, 4, 5, 6, 9]);
+        assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn test_drain_zst() {
+        let mut buf = SliceRingBuffer::<()>::new();
+        buf.push_back(());
+        buf.push_back(());
+        buf.push_back(());
+        buf.push_back(());
+        buf.push_back(());
+        assert_eq!(buf.len(), 5);
+
+        let mut drained = buf.drain(1..4);
+
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained.next(), Some(()));
+        assert_eq!(drained.next(), Some(()));
+        assert_eq!(drained.next(), Some(()));
+        assert_eq!(drained.next(), None);
+
+        // Drop drainer
+        drop(drained);
+
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn test_drain_zst_drop_incomplete() {
+        let mut buf = SliceRingBuffer::<()>::new();
+        buf.extend(iter::repeat_n((), 10));
+        assert_eq!(buf.len(), 10);
+
+        {
+            let mut drainer = buf.drain(2..8); // Drain 6 elements
+            assert_eq!(drainer.next(), Some(()));
+            assert_eq!(drainer.next(), Some(()));
+            // Drainer is dropped here
+        }
+
+        // 即使只迭代了2个，也应该移除全部6个元素
+        assert_eq!(buf.len(), 4);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_drain_panic_end_out_of_bounds() {
+        let mut buf = SliceRingBuffer::from_iter(0..5);
+        let _ = buf.drain(..6);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_drain_panic_start_out_of_bounds() {
+        // start > len 会导致 end > len (因为 end >= start)
+        let mut buf = SliceRingBuffer::from_iter(0..5);
+        let _ = buf.drain(6..);
+    }
+
+    #[test]
+    fn test_drain_next_back_only() {
+        let mut buf = SliceRingBuffer::from_iter(0..10);
+        // Drain [2, 3, 4, 5, 6, 7]
+        let mut drainer = buf.drain(2..8);
+
+        assert_eq!(drainer.next_back(), Some(7));
+        assert_eq!(drainer.next_back(), Some(6));
+        assert_eq!(drainer.next_back(), Some(5));
+        assert_eq!(drainer.next_back(), Some(4));
+        assert_eq!(drainer.next_back(), Some(3));
+        assert_eq!(drainer.next_back(), Some(2));
+        assert_eq!(drainer.next_back(), None);
+
+        // Drop the now-empty drainer
+        drop(drainer);
+        assert_eq!(buf.as_slice(), &[0, 1, 8, 9]);
+    }
+
+    #[test]
+    fn test_drain_mixed_next_and_next_back() {
+        let mut buf = SliceRingBuffer::from_iter(0..10);
+        // Drain [2, 3, 4, 5, 6, 7]
+        let mut drainer = buf.drain(2..8);
+
+        assert_eq!(drainer.next(), Some(2));
+        assert_eq!(drainer.next_back(), Some(7));
+        assert_eq!(drainer.len(), 4); // Remaining: [3, 4, 5, 6]
+
+        assert_eq!(drainer.next(), Some(3));
+        assert_eq!(drainer.next_back(), Some(6));
+        assert_eq!(drainer.len(), 2); // Remaining: [4, 5]
+
+        let remaining: Vec<_> = drainer.collect();
+        assert_eq!(remaining, vec![4, 5]);
+
+        assert_eq!(buf.as_slice(), &[0, 1, 8, 9]);
+    }
+
+    #[test]
+    fn test_drain_next_back_until_empty() {
+        let mut buf = SliceRingBuffer::from_iter(0..5);
+        let mut drainer = buf.drain(1..4); // [1, 2, 3]
+
+        assert_eq!(drainer.next(), Some(1));
+        assert_eq!(drainer.next_back(), Some(3));
+        assert_eq!(drainer.next(), Some(2)); // Last element
+
+        assert_eq!(drainer.next(), None);
+        assert_eq!(drainer.next_back(), None);
+    }
+
+    #[test]
+    fn test_drain_next_back_zst() {
+        let mut buf = SliceRingBuffer::<()>::new();
+        buf.extend(iter::repeat_n((), 10));
+
+        let mut drainer = buf.drain(3..7); // Drain 4 elements
+        assert_eq!(drainer.len(), 4);
+
+        assert_eq!(drainer.next_back(), Some(()));
+        assert_eq!(drainer.len(), 3);
+
+        assert_eq!(drainer.next(), Some(()));
+        assert_eq!(drainer.len(), 2);
+
+        assert_eq!(drainer.next_back(), Some(()));
+        assert_eq!(drainer.len(), 1);
+
+        assert_eq!(drainer.next_back(), Some(()));
+        assert_eq!(drainer.len(), 0);
+
+        assert_eq!(drainer.next_back(), None);
+
+        drop(drainer);
+        assert_eq!(buf.len(), 6);
+    }
+
+    #[test]
+    fn test_split_to() {
+        let mut rb = SliceRingBuffer::from(vec![1, 2, 3, 4, 5]);
+
+        // 从中间分割
+        let front = rb.split_to(3);
+        assert_eq!(front.as_slice(), &[1, 2, 3]);
+        assert_eq!(rb.as_slice(), &[4, 5]);
+        assert_eq!(rb.len(), 2);
+
+        // 从头部分割 (结果为空)
+        let mut rb2 = SliceRingBuffer::from(vec![10, 20]);
+        let front2 = rb2.split_to(0);
+        assert!(front2.is_empty());
+        assert_eq!(rb2.as_slice(), &[10, 20]);
+
+        // 分割所有元素
+        let mut rb3 = SliceRingBuffer::from(vec![10, 20]);
+        let front3 = rb3.split_to(2);
+        assert_eq!(front3.as_slice(), &[10, 20]);
+        assert!(rb3.is_empty());
+    }
+
+    #[test]
+    fn test_split_to_zst() {
+        let mut zst_rb = SliceRingBuffer::from([(); 8]);
+        let front = zst_rb.split_to(5);
+        assert_eq!(front.len(), 5);
+        assert_eq!(zst_rb.len(), 3);
+    }
+
+    #[test]
+    fn test_clone() {
+        let mut rb1 = SliceRingBuffer::with_capacity(5);
+        rb1.extend(0..5); // [0, 1, 2, 3, 4]
+        assert_eq!(rb1.pop_front(), Some(0));
+        assert_eq!(rb1.pop_front(), Some(1));
+        rb1.push_back(5); // 此时缓冲区是环绕状态: [2, 3, 4, 5]，head 在索引 2
+
+        let rb2 = rb1.clone();
+
+        // 确保它们相等但相互独立
+        assert_eq!(rb1.as_slice(), rb2.as_slice());
+        assert_eq!(rb1.len(), rb2.len());
+        assert_eq!(rb1.head(), rb2.head());
+
+        // 修改一个，另一个不应受影响
+        rb1.push_back(100);
+        assert_ne!(rb1.as_slice(), rb2.as_slice());
+        assert_eq!(rb2.as_slice(), &[2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_clone_zst() {
+        let mut rb1: SliceRingBuffer<()> = SliceRingBuffer::with_capacity(10);
+        rb1.extend(iter::repeat_n((), 5));
+        let rb2 = rb1.clone();
+
+        assert_eq!(rb1.len(), 5);
+        assert_eq!(rb2.len(), 5);
+
+        rb1.push_back(());
+        assert_eq!(rb1.len(), 6);
+        assert_eq!(rb2.len(), 5);
+    }
+
+    #[test]
+    fn test_shrink_to() {
+        let mut rb = SliceRingBuffer::with_capacity(allocation_granularity() * 2);
+        rb.extend(0..10);
+
+        // 缩容到比当前长度大的容量
+        rb.shrink_to(allocation_granularity());
+        assert_eq!(rb.capacity(), allocation_granularity());
+        assert_eq!(rb.as_slice(), &(0..10).collect::<Vec<_>>());
+
+        // 缩容到比当前容量还大，应该什么都不做
+        rb.shrink_to(allocation_granularity() * 2);
+        assert_eq!(rb.capacity(), allocation_granularity());
+    }
+
+    #[test]
+    #[should_panic(expected = "min_capacity (5) cannot be less than current length (10)")]
+    fn test_shrink_to_panic() {
+        let mut rb = SliceRingBuffer::from(vec![0; 10]);
+        rb.shrink_to(5); // 这里应该 panic
+    }
+
+    #[test]
+    fn test_try_push_full() {
+        let mut rb = SliceRingBuffer::from(vec![false; allocation_granularity()]);
+        assert_eq!(rb.len(), allocation_granularity());
+        assert_eq!(rb.capacity(), allocation_granularity());
+        assert!(rb.is_full());
+
+        // 尝试 push 应该失败并返回 None
+        assert!(rb.try_push_back(true).is_none());
+        assert!(rb.try_push_front(true).is_none());
+
+        // 缓冲区内容应保持不变
+        assert_eq!(rb.len(), allocation_granularity());
+    }
+    //todo truncate
+    #[test]
+    fn test_rotate_full() {
+        let mut rb = SliceRingBuffer::from(vec![false; allocation_granularity()]);
+        unsafe {
+            *rb.get_unchecked_mut(0) = true;
+        }
+        assert_eq!(rb.get(0), Some(&true));
+        assert_eq!(rb.head(), 0);
+        // 对一个满的缓冲区进行 rotate 应该只移动 head
+        rb.rotate(-2);
+        assert_eq!(rb.head(), allocation_granularity() - 2);
+        // 因为 head 移动了，所以切片视图会改变
+        assert_eq!(rb.get(2), Some(&true));
+    }
+
+    #[test]
+    fn test_eq_and_ord() {
+        let rb1 = SliceRingBuffer::from(vec![1, 2, 3]);
+        let mut rb2 = SliceRingBuffer::from(vec![1, 2, 3]);
+        let rb3 = SliceRingBuffer::from(vec![1, 2, 4]);
+        let rb4 = SliceRingBuffer::from(vec![1, 2]);
+
+        // 测试相等性
+        assert_eq!(rb1, rb2);
+        assert_ne!(rb1, rb3);
+        assert_ne!(rb1, rb4);
+
+        // 测试顺序
+        assert!(rb1 < rb3);
+        assert!(rb4 < rb1);
+
+        // 测试环绕状态下的缓冲区
+        rb2.pop_front();
+        rb2.push_back(4); // 变成 [2, 3, 4]，但 head != 0
+        let rb5 = SliceRingBuffer::from(vec![2, 3, 4]); // head == 0
+        assert_eq!(rb2, rb5);
+    }
 }

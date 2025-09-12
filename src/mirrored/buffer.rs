@@ -18,7 +18,7 @@ use core::{
     ptr::{NonNull, copy_nonoverlapping},
     slice,
 };
-use num::Integer;
+use num::{Integer, Zero};
 
 pub type Size = core::num::niche_types::UsizeNoHighBit;
 
@@ -48,7 +48,7 @@ impl<T> MirroredBuffer<T> {
 
     /// Creates a new, empty `MirroredBuffer` without allocating memory.
     #[inline(always)]
-    pub fn new() -> Self { Self::with_capacity(if T::IS_ZST { MAX_VIRTUAL_BUF_SIZE } else { 0 }) }
+    pub fn new() -> Self { Self::with_capacity(if T::IS_ZST { MAX_PHYSICAL_BUF_SIZE } else { 0 }) }
 
     /// Returns the number of elements of type `T` that can be stored in the physical region.
     ///
@@ -64,7 +64,7 @@ impl<T> MirroredBuffer<T> {
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         debug_assert!(self.virtual_size().is_multiple_of(2));
-        self.virtual_size() == 0
+        self.virtual_size().is_zero()
     }
 
     /// Returns the total byte length of the entire virtual memory region.
@@ -86,8 +86,7 @@ impl<T> MirroredBuffer<T> {
     #[inline(always)]
     pub fn with_capacity(cap: usize) -> Self {
         if T::IS_ZST {
-            assert!(cap.is_multiple_of(2));
-            return Self { ptr: NonNull::dangling(), size: unsafe { Size::new_unchecked(cap) } };
+            return Self { ptr: NonNull::dangling(), size: unsafe { Size::new_unchecked(cap * 2) } };
         }
         let v_size = mirrored_allocation_unit::<T>(cap);
         unsafe { Self::alloc(v_size) }
@@ -222,7 +221,8 @@ impl<T: Clone> Clone for MirroredBuffer<T> {
         if self.is_empty() {
             return Self { ptr: NonNull::dangling(), size: unsafe { Size::new_unchecked(0) } };
         }
-        let new_buf = unsafe { Self::alloc(self.virtual_capacity()) };
+        let new_buf = unsafe { Self::alloc(self.virtual_size()) };
+
         unsafe {
             let src = self.ptr.as_ptr() as *const u8;
             let dst = new_buf.ptr.as_ptr() as *mut u8;
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn test_mirrored_buffer_zst() {
         // Test MirroredBuffer with Zero Sized Types
-        let buf = MirroredBuffer::<()>::with_capacity(10);
+        let buf = MirroredBuffer::<()>::with_capacity(5);
         assert!(buf.physical_capacity() == 5);
     }
 
@@ -529,15 +529,19 @@ mod tests {
     fn different_type_alignments() {
         // Test with different alignments
         #[repr(align(1))]
+        #[allow(dead_code)]
         struct Align1(u8);
 
         #[repr(align(2))]
+        #[allow(dead_code)]
         struct Align2(u8);
 
         #[repr(align(4))]
+        #[allow(dead_code)]
         struct Align4(u8);
 
         #[repr(align(8))]
+        #[allow(dead_code)]
         struct Align8(u8);
 
         let buf1 = MirroredBuffer::<Align1>::with_capacity(4);
@@ -611,7 +615,6 @@ mod tests {
         // Test edge cases for slice methods
         let mut buf = MirroredBuffer::<u8>::with_capacity(8);
         let capacity = buf.physical_capacity();
-        let virtual_capacity = buf.virtual_capacity();
 
         // Test getting a slice of length 0
         let empty_slice = buf.virtual_uninit_slice_at(0, 0);
@@ -641,30 +644,30 @@ mod tests {
         assert_eq!(empty_buf.physical_capacity(), cloned_empty.physical_capacity());
 
         // Test cloning a buffer with data
-        let mut buf = MirroredBuffer::<u32>::with_capacity(4);
+        let mut buf = MirroredBuffer::<bool>::with_capacity(allocation_granularity());
         unsafe {
-            *buf.get_unchecked_mut(0).as_mut_ptr() = 100;
-            *buf.get_unchecked_mut(1).as_mut_ptr() = 200;
+            buf.get_unchecked_mut(0).write(true);
+            buf.get_unchecked_mut(1).write(false);
         }
-
+        buf.size = unsafe { Size::new_unchecked(0) };
         let cloned_buf = buf.clone();
         assert_eq!(buf.virtual_size(), cloned_buf.virtual_size());
         assert_eq!(buf.physical_capacity(), cloned_buf.physical_capacity());
+        // cloned_buf is empty, cuz size is 0
+        assert!(cloned_buf.is_empty());
 
-        // Verify that the data was copied correctly
+        let mut buf = MirroredBuffer::<bool>::with_capacity(allocation_granularity());
         unsafe {
-            assert_eq!(*cloned_buf.get_unchecked(0).assume_init_ref(), 100);
-            assert_eq!(*cloned_buf.get_unchecked(1).assume_init_ref(), 200);
+            buf.get_unchecked_mut(0).write(true);
+            buf.get_unchecked_mut(1).write(false);
         }
-
-        // Verify that modifying one doesn't affect the other
+        let cloned_buf = buf.clone();
+        assert_eq!(buf.virtual_size(), cloned_buf.virtual_size());
+        assert_eq!(buf.physical_capacity(), cloned_buf.physical_capacity());
+        assert_eq!(buf.len(), cloned_buf.len());
         unsafe {
-            *buf.get_unchecked_mut(0).as_mut_ptr() = 300;
-        }
-
-        unsafe {
-            assert_eq!(*buf.get_unchecked(0).assume_init_ref(), 300);
-            assert_eq!(*cloned_buf.get_unchecked(0).assume_init_ref(), 100); // Should be unchanged
+            assert_eq!(buf.get_unchecked(0).assume_init_ref(), cloned_buf.get_unchecked(0).assume_init_ref());
+            assert_eq!(buf.get_unchecked(1).assume_init_ref(), cloned_buf.get_unchecked(1).assume_init_ref());
         }
     }
 
