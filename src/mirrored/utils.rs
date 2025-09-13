@@ -1,6 +1,6 @@
 use crate::mirrored::allocation_granularity;
-use core::mem::{SizedTypeProperties, size_of};
 use num::Integer;
+use std::mem::{SizedTypeProperties, size_of};
 
 /// Calculates the byte size of a mirrored allocation, typically used for implementing a ring buffer.
 /// To ensure a valid virtual memory mapping, the size of a single mirrored region must be a

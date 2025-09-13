@@ -1,6 +1,7 @@
 //! Implements the allocator hooks on top of window's virtual alloc.
+use crate::mirrored::MAX_VIRTUAL_BUF_SIZE;
 use anyhow::{Context, Result as AnyResult, bail};
-use core::{
+use std::{
     ffi::c_void,
     mem::MaybeUninit,
     sync::atomic::{AtomicUsize, Ordering},
@@ -21,8 +22,6 @@ use windows::{
     core::PCWSTR,
 };
 
-use crate::mirrored::MAX_VIRTUAL_BUF_SIZE;
-
 /// Retrieves the system's memory allocation granularity, caching the value for performance.
 ///
 /// The allocation granularity is the smallest unit for which virtual memory can be reserved.
@@ -30,7 +29,7 @@ use crate::mirrored::MAX_VIRTUAL_BUF_SIZE;
 pub(crate) fn allocation_granularity() -> usize {
     const UNINIT_ALLOCATION_GRANULARITY: usize = 0;
     static ALLOCATION_GRANULARITY: AtomicUsize = AtomicUsize::new(0);
-    let cached_val = ALLOCATION_GRANULARITY.load(Ordering::Relaxed);
+    let cached_val = ALLOCATION_GRANULARITY.load(Ordering::Acquire);
     // fast path
     if cached_val != UNINIT_ALLOCATION_GRANULARITY {
         return cached_val;
@@ -45,8 +44,8 @@ pub(crate) fn allocation_granularity() -> usize {
     match ALLOCATION_GRANULARITY.compare_exchange(
         UNINIT_ALLOCATION_GRANULARITY, // when the value is uninit, we expect to write to it
         updated_val,
-        Ordering::SeqCst,
-        Ordering::Relaxed,
+        Ordering::Release,
+        Ordering::Acquire,
     ) {
         Ok(_) => updated_val,
         Err(val_from_other_thread) => val_from_other_thread, // another thread has updated the value

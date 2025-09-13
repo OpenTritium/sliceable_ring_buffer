@@ -12,13 +12,13 @@
 
 use super::*;
 use crate::mirrored::utils::mirrored_allocation_unit;
-use core::{
+use num::{Integer, Zero};
+use std::{
     mem::{MaybeUninit, SizedTypeProperties, size_of},
     ops::{Deref, DerefMut},
     ptr::{NonNull, copy_nonoverlapping},
     slice,
 };
-use num::{Integer, Zero};
 
 pub type Size = core::num::niche_types::UsizeNoHighBit;
 

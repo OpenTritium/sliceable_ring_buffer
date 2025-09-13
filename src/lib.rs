@@ -2,12 +2,14 @@
 #![feature(sized_type_properties)]
 #![feature(ptr_as_uninit)]
 #![feature(maybe_uninit_slice)]
-#![cfg_attr(not(any(feature = "use_std", test)), no_std)]
 
+// TODO: append front, etc.
 mod mirrored;
 
 use crate::mirrored::MAX_PHYSICAL_BUF_SIZE;
-use core::{
+use mirrored::{MirroredBuffer, mirrored_allocation_unit};
+use num::Zero;
+use std::{
     cmp::Ordering,
     iter::{FromIterator, FusedIterator},
     marker::PhantomData,
@@ -15,8 +17,6 @@ use core::{
     ops::{Bound, Deref, DerefMut, Neg, RangeBounds},
     ptr::{NonNull, copy, copy_nonoverlapping, drop_in_place, read, slice_from_raw_parts_mut, write},
 };
-use mirrored::{MirroredBuffer, mirrored_allocation_unit};
-use num::Zero;
 
 #[derive(Debug, Clone)]
 pub struct SliceRingBuffer<T> {
