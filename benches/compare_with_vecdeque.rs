@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use sliceable_ring_buffer::SliceRingBuffer; // 确保这是你的 crate 名
+use sliceable_ring_buffer::SliceRingBuffer;
 use std::{collections::VecDeque, hint::black_box, time::Duration};
 
 // 1KB, 32KB, 8MB, 16MB

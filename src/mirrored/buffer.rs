@@ -76,7 +76,7 @@ impl<T> MirroredBuffer<T> {
 
     /// Returns the total byte length of the entire virtual memory region.
     #[inline]
-    pub fn virtual_size(&self) -> usize { self.size.as_inner() }
+    pub const fn virtual_size(&self) -> usize { self.size.as_inner() }
 
     /// Returns the byte length of the physical memory region (which is half of the virtual region).
     #[inline]

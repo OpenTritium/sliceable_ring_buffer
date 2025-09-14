@@ -29,10 +29,10 @@ use std::{
     cmp::Ordering,
     iter::{FromIterator, FusedIterator},
     marker::PhantomData,
-    mem::{MaybeUninit, needs_drop, replace, zeroed},
-    ops::{Bound, Deref, DerefMut, Neg, RangeBounds},
+    mem::{MaybeUninit, needs_drop, zeroed},
+    ops::{Deref, DerefMut, Neg, RangeBounds},
     ptr,
-    ptr::{NonNull, copy, copy_nonoverlapping, drop_in_place, read, slice_from_raw_parts_mut, write},
+    ptr::{NonNull, copy, copy_nonoverlapping, drop_in_place, read, write},
 };
 
 #[derive(Debug)]
@@ -57,7 +57,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer: SliceRingBuffer<i32> = SliceRingBuffer::new();
     /// assert_eq!(buffer.len(), 0);
@@ -83,7 +83,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer: SliceRingBuffer<i32> = SliceRingBuffer::with_capacity(10);
     /// assert_eq!(buffer.len(), 0);
@@ -104,7 +104,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let buffer: SliceRingBuffer<i32> = SliceRingBuffer::with_capacity(10);
     /// assert!(buffer.capacity() >= 10);
@@ -118,7 +118,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// buffer.push_back(1);
@@ -138,7 +138,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer: SliceRingBuffer<i32> = SliceRingBuffer::new();
     /// assert!(buffer.is_empty());
@@ -155,7 +155,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::with_capacity(2);
     /// buffer.push_back(1);
@@ -200,7 +200,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// buffer.push_back(1);
@@ -220,7 +220,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// buffer.push_back(1);
@@ -318,7 +318,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buf1 = SliceRingBuffer::new();
     /// buf1.push_back(3);
@@ -383,7 +383,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// assert_eq!(buffer.front(), None);
@@ -400,7 +400,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// assert_eq!(buffer.front_mut(), None);
@@ -420,7 +420,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// assert_eq!(buffer.back(), None);
@@ -438,7 +438,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// assert_eq!(buffer.back_mut(), None);
@@ -461,7 +461,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buf = SliceRingBuffer::new();
     /// buf.push_back(1);
@@ -493,7 +493,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buf = SliceRingBuffer::new();
     /// buf.push_back(1);
@@ -531,27 +531,21 @@ impl<T> SliceRingBuffer<T> {
     fn realloc_and_restore_part(&mut self, new_p_cap: usize) {
         debug_assert!(new_p_cap <= MAX_PHYSICAL_BUF_SIZE);
         debug_assert!(!Self::ELEM_IS_ZST);
+        let mut new_buf = MirroredBuffer::<T>::with_capacity(new_p_cap);
+        let len = self.len();
+        let reserve_len = len.min(new_p_cap);
+        let old_slice = self.as_slice();
+        let new_uninit_slice = new_buf.as_uninit_virtual_mut_slice();
         unsafe {
-            let len = self.len();
-            let obsolete_len = len.saturating_sub(new_p_cap);
-            let reserve_len = len - obsolete_len;
-            let new_buf = MirroredBuffer::<T>::with_capacity(new_p_cap);
-            let old_buf = &mut self.buf;
-            if obsolete_len.is_zero() {
-                let dst = new_buf.as_ptr();
-                let src = old_buf.as_ptr().add(self.head());
-                // 拷贝要保留的元素
-                copy_nonoverlapping(src, dst, reserve_len);
-                // 确保要丢掉的元素都能正确析构
-                let drop_start = src.add(reserve_len);
-                let drop_slice = slice_from_raw_parts_mut(drop_start, obsolete_len);
-                drop_in_place(drop_slice);
+            for i in 0..reserve_len {
+                let val = ptr::read(old_slice.get_unchecked(i));
+                new_uninit_slice.get_unchecked_mut(i).write(val);
             }
-            let old_buf = replace(&mut self.buf, new_buf);
-            drop(old_buf); // 释放旧的缓冲区
-            self.head = 0;
-            self.len = reserve_len;
         }
+        self.len = 0;
+        self.buf = new_buf;
+        self.head = 0;
+        self.len = reserve_len;
     }
 
     /// Creates a draining iterator that removes the specified range in the `SliceRingBuffer`
@@ -570,7 +564,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut v = SliceRingBuffer::new();
     /// v.push_back(1);
@@ -586,7 +580,7 @@ impl<T> SliceRingBuffer<T> {
         R: RangeBounds<usize>,
     {
         // Both `start` and `end` are relative to the front of the deque
-        use Bound::{Excluded, Included, Unbounded};
+        use std::ops::Bound::{Excluded, Included, Unbounded};
         let len = self.len();
         let start = match range.start_bound() {
             Included(&n) => n,
@@ -722,7 +716,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// buffer.push_back(1);
@@ -753,7 +747,7 @@ impl<T> SliceRingBuffer<T> {
     /// # Examples
     ///
     /// ```
-    /// use slice_ring_buffer::SliceRingBuffer;
+    /// use sliceable_ring_buffer::SliceRingBuffer;
     ///
     /// let mut buffer = SliceRingBuffer::new();
     /// buffer.push_back(1);
@@ -2117,7 +2111,7 @@ mod tests {
     }
 
     #[test]
-    fn test_slice_ring_buffer_empty() {
+    fn test_sliceable_ring_buffer_empty() {
         let rb: SliceRingBuffer<i32> = SliceRingBuffer::new();
         assert!(rb.is_empty());
         assert_eq!(rb.len(), 0);
@@ -2126,7 +2120,7 @@ mod tests {
     }
 
     #[test]
-    fn test_slice_ring_buffer_empty_zst() {
+    fn test_sliceable_ring_buffer_empty_zst() {
         let rb: SliceRingBuffer<()> = SliceRingBuffer::new();
         assert!(rb.is_empty());
         assert_eq!(rb.len(), 0);
@@ -2726,6 +2720,7 @@ mod tests {
         assert!(rb2.is_empty());
     }
 }
+
 #[cfg(test)]
 mod proptests {
     use super::*;
