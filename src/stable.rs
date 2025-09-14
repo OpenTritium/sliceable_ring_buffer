@@ -5,9 +5,13 @@ pub trait SizeCompact {
     fn as_inner(&self) -> usize;
 }
 impl SizeCompact for Size {
-    unsafe fn new_unchecked(value: usize) -> Self { value }
+    unsafe fn new_unchecked(value: usize) -> Self {
+        value
+    }
 
-    fn as_inner(&self) -> usize { *self }
+    fn as_inner(&self) -> usize {
+        *self
+    }
 }
 
 pub trait MaybeUninitCompact<T> {
@@ -16,9 +20,13 @@ pub trait MaybeUninitCompact<T> {
 }
 
 impl<T> MaybeUninitCompact<T> for [MaybeUninit<T>] {
-    unsafe fn assume_init_ref(&self) -> &[T] { unsafe { &*(ptr::from_ref::<Self>(self) as *const [T]) } }
+    unsafe fn assume_init_ref(&self) -> &[T] {
+        unsafe { &*(ptr::from_ref::<Self>(self) as *const [T]) }
+    }
 
-    unsafe fn assume_init_mut(&mut self) -> &mut [T] { unsafe { &mut *(std::ptr::from_mut::<Self>(self) as *mut [T]) } }
+    unsafe fn assume_init_mut(&mut self) -> &mut [T] {
+        unsafe { &mut *(std::ptr::from_mut::<Self>(self) as *mut [T]) }
+    }
 }
 
 #[allow(unused)]
@@ -32,13 +40,12 @@ pub trait UsizeCompact {
 impl UsizeCompact for usize {
     fn strict_mul(self, rhs: Self) -> Self {
         let (a, b) = self.overflowing_mul(rhs);
-        if b { panic!("mul overflow") } else { a }
+        if b { panic!("attempt to multiply with overflow") } else { a }
     }
 
     fn overflowing_sub_signed(self, rhs: isize) -> (Self, bool) {
-        let (res, overflow) = self.overflowing_sub(rhs.cast_unsigned());
-
-        (res, overflow ^ (rhs < 0))
+        let (r, overflow) = self.overflowing_sub(rhs.cast_unsigned());
+        (r, overflow ^ (rhs < 0))
     }
 
     fn strict_sub_signed(self, rhs: isize) -> Self {

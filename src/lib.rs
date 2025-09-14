@@ -19,7 +19,8 @@ mod tokio;
 #[cfg(not(feature = "unstable"))]
 mod stable;
 #[cfg(not(feature = "unstable"))]
-use stable::MaybeUninitCompact;
+#[cfg_attr(not(feature = "unstable"), allow(unused_imports))]
+use stable::{MaybeUninitCompact, UsizeCompact};
 
 mod mirrored;
 use crate::mirrored::MAX_PHYSICAL_BUF_SIZE;

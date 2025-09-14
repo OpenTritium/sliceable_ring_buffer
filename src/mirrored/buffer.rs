@@ -54,7 +54,9 @@ impl<T> MirroredBuffer<T> {
 
     /// Creates a new, empty `MirroredBuffer` without allocating memory.
     #[inline]
-    pub fn new() -> Self { Self::with_capacity(if Self::ELEM_IS_ZST { MAX_PHYSICAL_BUF_SIZE } else { 0 }) }
+    pub fn new() -> Self {
+        Self::with_capacity(if Self::ELEM_IS_ZST { MAX_PHYSICAL_BUF_SIZE } else { 0 })
+    }
 
     /// Returns the number of elements of type `T` that can be stored in the physical region.
     ///
@@ -76,7 +78,9 @@ impl<T> MirroredBuffer<T> {
 
     /// Returns the total byte length of the entire virtual memory region.
     #[inline]
-    pub const fn virtual_size(&self) -> usize { self.size.as_inner() }
+    pub fn virtual_size(&self) -> usize {
+        self.size.as_inner()
+    }
 
     /// Returns the byte length of the physical memory region (which is half of the virtual region).
     #[inline]
@@ -134,7 +138,9 @@ impl<T> MirroredBuffer<T> {
 
     /// Calculates the length of the virtual slice in terms of number of `T`s.
     #[inline]
-    fn virtual_capacity(&self) -> usize { self.physical_capacity() * 2 }
+    fn virtual_capacity(&self) -> usize {
+        self.physical_capacity() * 2
+    }
 
     /// Returns the buffer's entire virtual memory region as a slice of `MaybeUninit<T>`.
     #[inline]
@@ -186,12 +192,16 @@ impl<T> MirroredBuffer<T> {
 
     /// Returns a raw, mutable pointer to the beginning of the buffer.
     #[inline]
-    pub const fn as_ptr(&self) -> *mut T { self.ptr.as_ptr() }
+    pub const fn as_ptr(&self) -> *mut T {
+        self.ptr.as_ptr()
+    }
 }
 
 impl<T> Default for MirroredBuffer<T> {
     #[inline]
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T> Drop for MirroredBuffer<T> {
@@ -210,12 +220,16 @@ impl<T> Deref for MirroredBuffer<T> {
     type Target = [MaybeUninit<T>];
 
     #[inline]
-    fn deref(&self) -> &Self::Target { self.as_uninit_virtaul_slice() }
+    fn deref(&self) -> &Self::Target {
+        self.as_uninit_virtaul_slice()
+    }
 }
 
 impl<T> DerefMut for MirroredBuffer<T> {
     #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target { self.as_uninit_virtual_mut_slice() }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_uninit_virtual_mut_slice()
+    }
 }
 
 unsafe impl<T> Send for MirroredBuffer<T> where T: Send {}

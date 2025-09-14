@@ -44,7 +44,7 @@ tokio = { version = "1.47.1", features = ["full"] }
 criterion = "0.7.0"
 
 [features]
-default = ["io", "unstable"]
+default = ["io"]
 bytes = ["dep:bytes"]
 tokio-io = ["dep:tokio"]
 io = []
