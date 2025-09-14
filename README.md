@@ -37,7 +37,7 @@ graph TD;
 | **Obtain Contiguous Slice (`as_slice`)** | **O(1)**, always succeeds and is virtually zero-cost. | O(1) best case, **O(n) worst case** (when data wraps, may require allocating new memory and performing copies to provide a single slice). |
 | **Iteration Performance** | **Faster**. Guaranteed memory continuity allows the CPU's cache and prefetch mechanisms to work more efficiently. | Fast. But when data wraps, iterators internally handle branch logic, incurring a slight performance overhead. |
 | **Memory Allocation Method** | Uses **system calls** (`mmap`, `VirtualAlloc2`, etc.) to create virtual memory mappings. | Uses Rust's **global heap allocator** (`malloc`/`realloc`). |
-| **Resize Cost (triggered by `push_back`)** | **Higher**. Re-establishing virtual memory mappings involves multiple system calls, which is costly. | **Lower**. Typically just one `realloc` call. |
+| **Resize Cost (triggered by `push_back`)** | **Higher**. Re-establishing virtual memory mappings involves multiple system calls, which is costly(Therefore, pre-allocate with with_capacity() whenever possible). | **Lower**. Typically just one `realloc` call. |
 
 **Summary**:
 
@@ -82,7 +82,7 @@ You can add integration capabilities with key libraries in the ecosystem to `Sli
   - **Use Case**: Suitable for projects pursuing ultimate performance and the latest features. Enabling this feature requires using the Nightly version of the Rust compiler. It utilizes the following Nightly APIs:
     - Advanced slice operations for `MaybeUninit` (`maybe_uninit_slice`).
     - Stricter integer overflow checks (calculations related to `strict_provenance`).
-    - Leverages `NonZeroUsize` for niche optimization (`temporary_niche_types`) to optimize the memory layout of internal size fields.
+    - Leverages niche optimization (`temporary_niche_types`) to optimize the memory layout of internal size fields.
 
 ## Relationship with [`slice_ring_buffer`](https://github.com/LiquidityC/slice_ring_buffer.git) and [`slice_deque`](https://github.com/gnzlbg/slice_deque)
 
@@ -124,11 +124,11 @@ graph TD;
 | **获取连续切片 (`as_slice`)** | **O(1)**，永远成功且几乎零成本。 | O(1) 最佳情况, **O(n) 最差情况** (当数据环绕时，需要分配新内存并执行拷贝才能提供单个切片)。 |
 | **迭代性能** | **更快**。由于内存保证连续，CPU 的缓存和预取机制能更高效地工作。 | 较快。但在数据环绕时，迭代器内部需要处理分支逻辑，有轻微性能开销。 |
 | **内存分配方式** | 使用**系统调用** (`mmap`, `VirtualAlloc2` 等) 来创建虚拟内存映射。 | 使用 Rust 的**全局堆分配器** (`malloc`/`realloc`)。 |
-| **扩容成本 (`push_back` 触发)** | **较高**。重新进行虚拟内存映射涉及多次系统调用，开销较大。 | **较低**。通常只是一次 `realloc` 调用。 |
+| **扩容成本 (`push_back` 触发)** | **较高**。重新进行虚拟内存映射涉及多次系统调用，开销较大（所以尽可能提前 `with_capacity()`）。 | **较低**。通常只是一次 `realloc` 调用。 |
 
 **总结**:
 
-- 如果你的核心场景是“**写一次，读多次**”，需要频繁地将整个缓冲区作为**连续切片**传递给其他 API，`SliceRingBuffer` 是无与伦比的选择。
+- 如果你的核心场景是“**写一次，读多次**”，需要频繁地将整个缓冲区作为**连续切片**传递给其他 API，`SliceRingBuffer` 是一个好选择。
 - 如果你的场景是频繁的、细碎的 `push` 和 `pop` 操作，且很少需要整个缓冲区的连续视图，那么 `VecDeque` 可能是更均衡的选择。
 
 ## 为什么容量始终虚大
@@ -170,7 +170,7 @@ graph TD;
 
     - MaybeUninit 的高级切片操作 (maybe_uninit_slice)。
     - 更严格的整数溢出检查 (strict_provenance相关的计算)。
-    - 利用 NonZeroUsize 的 niche-optimization (temporary_niche_types) 来优化内部 size 字段的内存布局。
+    - 利用 niche-optimization (temporary_niche_types) 来优化内部 size 字段的内存布局。
 
 ## 与 [`slice_ring_buffer`](https://github.com/LiquidityC/slice_ring_buffer.git) 和 [`slice_deque`](https://github.com/gnzlbg/slice_deque) 的关系
 
