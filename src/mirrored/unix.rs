@@ -63,9 +63,9 @@ fn create_mem_fd() -> AnyResult<OwnedFd> {
             stat::Mode,
         },
     };
-    let name = get_random_str(8);
-    let fd = shm_open(name.as_ref(), OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL, Mode::from_bits_truncate(0o600))?;
-    shm_unlink(name.as_ref()).context("shm_unlink failed")?;
+    let name = format!("/{}",get_random_str(8));
+    let fd = shm_open(name.as_str(), OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL, Mode::from_bits_truncate(0o600))?;
+    shm_unlink(name.as_str()).context("shm_unlink failed")?;
     Ok(fd)
 }
 
@@ -94,6 +94,11 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
         })
         .context("mmap failed")?
     };
+    #[cfg(all(target_family = "unix", not(any(target_os = "linux", target_os = "android"))))]
+    {
+        unsafe { munmap(placeholder, virtual_size) }
+            .with_context(|| format!("Failed to unmap placeholder at {:?}", placeholder))?;
+    }
     let map_view = |addr, fd| unsafe {
         mmap(
             Some(nonnull_into_nonzerousize(addr)), // 映射到指定地址
@@ -109,7 +114,10 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     let low_view = map_view(low_half_addr, fd.as_fd())
         .with_context(|| format!("Failed to map low half at {:?}", low_half_addr))
         .inspect_err(|_| {
-            let _ = unsafe { munmap(placeholder, virtual_size) };
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                let _ = unsafe { munmap(placeholder, virtual_size) };
+            }
         })?;
     let high_view = map_view(high_half_addr, fd.as_fd())
         .inspect_err(|_| {
