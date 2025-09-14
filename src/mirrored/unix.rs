@@ -51,34 +51,27 @@ fn create_mem_fd() -> AnyResult<OwnedFd> {
     let fd = memfd_create("mirrored_buffer", MFdFlags::MFD_CLOEXEC)?;
     Ok(fd)
 }
+#[cfg(all(target_family = "unix", not(any(target_os = "linux", target_os = "android"))))]
+fn get_random_str(n: usize) -> Box<str> { std::iter::repeat_with(|| fastrand::alphanumeric()).take(n).collect() }
 
 #[cfg(all(target_family = "unix", not(any(target_os = "linux", target_os = "android"))))]
-fn create_mem_fd() -> AnyResult<RawFd> {
-    //     // 为了避免命名冲突，我们使用一个随机生成的名字
-    // use nix::{
-    //     fcntl::OFlag,
-    //     sys::{
-    //         mman::{shm_open, shm_unlink},
-    //         stat::Mode,
-    //     },
-    // };
-
-    // let mut name = [0u8; 12];
-    // getrandom::getrandom(&mut name).context("Failed to generate random name for shm_open")?;
-    // let name = format!("/{}", hex::encode(name));
-
-    // let fd = shm_open(name.as_str(), OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL, Mode::from_bits_truncate(0o600))
-    //     .with_context(|| format!("shm_open with name '{}' failed", name))?;
-
-    // // shm_unlink 可以在 fd 打开时立即调用，内核会等到所有引用关闭后才真正删除它。
-    // // 这可以确保即使程序崩溃，共享内存对象也会被清理。
-    // shm_unlink(name.as_str()).context("shm_unlink failed")?;
-    todo!()
+fn create_mem_fd() -> AnyResult<OwnedFd> {
+    use nix::{
+        fcntl::OFlag,
+        sys::{
+            mman::{shm_open, shm_unlink},
+            stat::Mode,
+        },
+    };
+    let name = get_random_str(8);
+    let fd = shm_open(name.as_ref(), OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL, Mode::from_bits_truncate(0o600))?;
+    shm_unlink(name.as_ref()).context("shm_unlink failed")?;
+    Ok(fd)
 }
 
 pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
-        virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity()),
+        virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity() * 2),
         "virtual_size must be a non-zero, even multiple of allocation_granularity()"
     );
     let physical_size = virtual_size / 2;
@@ -89,12 +82,16 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     let fd = create_mem_fd()?;
     ftruncate(fd.as_fd(), physical_size as _)?;
     let placeholder = unsafe {
-        mmap_anonymous(
-            None,
-            virtual_size.try_into().unwrap(),
-            ProtFlags::PROT_NONE,
-            MapFlags::MAP_PRIVATE | MapFlags::MAP_NORESERVE,
-        )
+        mmap_anonymous(None, virtual_size.try_into().unwrap(), ProtFlags::PROT_NONE, {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                MapFlags::MAP_PRIVATE | MapFlags::MAP_NORESERVE
+            }
+            #[cfg(all(target_family = "unix", not(any(target_os = "linux", target_os = "android"))))]
+            {
+                MapFlags::MAP_PRIVATE
+            }
+        })
         .context("mmap failed")?
     };
     let map_view = |addr, fd| unsafe {
@@ -125,7 +122,6 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     Ok(low_view.as_ptr() as *mut u8)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
     debug_assert!(!ptr.is_null(), "ptr must be a valid pointer");
     debug_assert!(
