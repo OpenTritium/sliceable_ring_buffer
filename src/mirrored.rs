@@ -11,11 +11,11 @@ mod unix;
 #[cfg(unix)]
 pub(crate) use unix::*;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-mod macos;
+#[cfg(target_vendor = "apple")]
+mod darwin;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-pub(crate) use macos::*;
+#[cfg(target_vendor = "apple")]
+pub(crate) use darwin::*;
 
 #[cfg(windows)]
 mod windows;
