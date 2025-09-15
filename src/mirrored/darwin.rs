@@ -17,7 +17,7 @@ use std::mem::MaybeUninit;
 /// Retrieves the system's memory allocation granularity (page size).
 ///
 /// ## System APIs Used
-/// - [`vm_page_size`](https://developer.apple.com/documentation/kernel/vm_page_size)
+/// - `vm_page_size`
 #[inline(always)]
 pub(crate) fn allocation_granularity() -> usize { unsafe { vm_page_size as usize } }
 
@@ -48,9 +48,9 @@ pub(crate) fn allocation_granularity() -> usize { unsafe { vm_page_size as usize
 /// Returns an `Err` if any underlying OS API call fails.
 ///
 /// ## System APIs Used
-/// - [`mach_task_self`](https://developer.apple.com/documentation/kernel/mach_task_self)
-/// - [`mach_vm_allocate`](https://developer.apple.com/documentation/kernel/mach_vm_allocate)
-/// - [`mach_vm_remap`](https://developer.apple.com/documentation/kernel/mach_vm_remap)
+/// - `mach_task_self`
+/// - [`mach_vm_allocate`](https://developer.apple.com/documentation/kernel/1402376-mach_vm_allocate)
+/// - [`mach_vm_remap`](https://developer.apple.com/documentation/kernel/1402218-mach_vm_remap)
 pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
         virtual_size > 0
@@ -113,8 +113,8 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
 /// Returns an `Err` if any underlying OS deallocation step fails.
 ///
 /// ## System APIs Used
-/// - [`mach_task_self`](https://developer.apple.com/documentation/kernel/mach_task_self)
-/// - [`mach_vm_deallocate`](https://developer.apple.com/documentation/kernel/mach_vm_deallocate)
+/// - `mach_task_self`
+/// - [`mach_vm_deallocate`](https://developer.apple.com/documentation/kernel/1402285-mach_vm_deallocate)
 pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
