@@ -1,5 +1,6 @@
 //! Implements the allocator hooks on top of window's virtual alloc.
-use crate::mirrored::MAX_VIRTUAL_BUF_SIZE;
+
+use crate::mirrored::{MAX_PHYSICAL_BUF_SIZE, MAX_VIRTUAL_BUF_SIZE};
 use anyhow::{Context, Result as AnyResult, bail};
 use std::{
     ffi::c_void,
@@ -82,14 +83,14 @@ pub(crate) fn allocation_granularity() -> usize {
 /// Returns an `Err` if any underlying OS API call fails.
 pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
-        virtual_size.is_multiple_of(allocation_granularity()) && virtual_size > 0,
-        "virtual_size must be a multiple of allocation_granularity() and > 0"
+        virtual_size.is_multiple_of(allocation_granularity() * 2) && virtual_size > 0,
+        "virtual_size must be a multiple of double allocation_granularity() and > 0"
     );
     // if virtual_size is multiple of allocation_granularity(), so it could be divided by 2
     let physical_size = virtual_size / 2;
     debug_assert!(
-        physical_size != 0 && physical_size <= MAX_VIRTUAL_BUF_SIZE,
-        "physical_size must be in range (0, isize::MAX)"
+        physical_size != 0 && physical_size <= MAX_PHYSICAL_BUF_SIZE,
+        "physical_size must be in range (0, MAX_PHYSICAL_BUF_SIZE)"
     );
     let max_size_low = physical_size as u32;
     let max_size_high = (physical_size >> 32) as u32;
@@ -102,7 +103,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
             max_size_low,
             PCWSTR::null(),
         )
-        .with_context(|| "CreateFileMappingW failed")?;
+        .context("CreateFileMappingW failed")?;
         let current_process = GetCurrentProcess();
         let placeholder = VirtualAlloc2(
             Some(current_process),
@@ -183,8 +184,8 @@ pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> A
     let ptr = ptr as *mut c_void;
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
-        virtual_size.is_multiple_of(allocation_granularity()) && virtual_size > 0,
-        "virtual_size must be a multiple of allocation_granularity() and > 0"
+        virtual_size.is_multiple_of(allocation_granularity() * 2) && virtual_size > 0,
+        "virtual_size must be a multiple of double allocation_granularity() and > 0"
     );
     // if virtual_size is multiple of allocation_granularity(), so it could be divided by 2
     let physical_size = virtual_size / 2;

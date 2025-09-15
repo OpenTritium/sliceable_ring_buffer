@@ -1,12 +1,6 @@
-//! Non-racy linux-specific mirrored memory allocation.
-//!
-//! 功能	      Windows API	                      Linux / Android API	          macOS API	        BSD API
-// 创建物理存储	CreateFileMappingW	               memfd_create 或 shm_open	        mach_vm_allocate	shm_open
-// 预留虚拟地址	VirtualAlloc2	                    mmap + munmap	                mach_vm_allocate	mmap + munmap
-// 映射/镜像内存	MapViewOfFile3	                mmap (使用 MAP_FIXED)	        mach_vm_remap	    mmap (使用 MAP_FIXED)
-// 释放/取消映射	UnmapViewOfFile2, VirtualFree	munmap	                        mach_vm_deallocate	munmap, shm_unlink
+//! Non-racy unix-specific mirrored memory allocation.
 
-use crate::mirrored::MAX_VIRTUAL_BUF_SIZE;
+use crate::mirrored::{MAX_PHYSICAL_BUF_SIZE, MAX_VIRTUAL_BUF_SIZE};
 use anyhow::{Context, Result as AnyResult};
 use nix::{
     errno::Errno,
@@ -63,7 +57,7 @@ fn create_mem_fd() -> AnyResult<OwnedFd> {
             stat::Mode,
         },
     };
-    let name = format!("/{}",get_random_str(8));
+    let name = format!("/{}", get_random_str(8));
     let fd = shm_open(name.as_str(), OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL, Mode::from_bits_truncate(0o600))?;
     shm_unlink(name.as_str()).context("shm_unlink failed")?;
     Ok(fd)
@@ -71,12 +65,12 @@ fn create_mem_fd() -> AnyResult<OwnedFd> {
 
 pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
-        virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity() * 2),
+        virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity() * 2) && virtual_size <= MAX_VIRTUAL_BUF_SIZE,
         "virtual_size must be a non-zero, even multiple of allocation_granularity()"
     );
     let physical_size = virtual_size / 2;
     debug_assert!(
-        physical_size != 0 && physical_size <= MAX_VIRTUAL_BUF_SIZE,
+        physical_size != 0 && physical_size <= MAX_PHYSICAL_BUF_SIZE,
         "physical_size must be in range (0, isize::MAX)"
     );
     let fd = create_mem_fd()?;
@@ -133,7 +127,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
 pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
     debug_assert!(!ptr.is_null(), "ptr must be a valid pointer");
     debug_assert!(
-        virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity()),
+        virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity() * 2),
         "virtual_size must be a non-zero multiple of allocation_granularity()"
     );
     unsafe { munmap(NonNull::new_unchecked(ptr as *mut c_void), virtual_size) }
