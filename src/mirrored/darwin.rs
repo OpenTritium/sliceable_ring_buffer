@@ -14,12 +14,43 @@ use mach2::{
 };
 use std::mem::MaybeUninit;
 
+/// Retrieves the system's memory allocation granularity (page size).
+///
+/// ## System APIs Used
+/// - [`vm_page_size`](https://developer.apple.com/documentation/kernel/vm_page_size)
 #[inline(always)]
 pub(crate) fn allocation_granularity() -> usize { unsafe { vm_page_size as usize } }
 
-/// Allocates a mirrored memory region.
-/// The returned pointer points to a virtual memory region of `virtual_size`.
-/// The second half of this region is a mirror of the first half.
+/// Allocates a mirrored memory buffer, ideal for high-performance circular buffers.
+///
+/// This is achieved by allocating a physical memory region and then mapping it to two contiguous
+/// virtual memory regions. Writes to the first half `[0, size/2)` are mirrored to the
+/// second half `[size/2, size)`, and vice versa.
+///
+/// # Arguments
+///
+/// * `virtual_size`: The total virtual size of the buffer. This must be a non-zero, even multiple of the system's
+///   `allocation_granularity()`. The usable ring buffer capacity will be `virtual_size / 2`.
+///
+/// # Returns
+///
+/// On success, returns a raw pointer to the start of the `virtual_size`-byte mirrored region.
+///
+/// # Safety
+///
+/// The caller is responsible for the following invariants:
+/// - The memory must be deallocated **exactly once** using `deallocate_mirrored` with the same `virtual_size`. Do not
+///   use `Box` or other allocators.
+/// - All memory access must be within the `[0, virtual_size)` bounds.
+///
+/// # Errors
+///
+/// Returns an `Err` if any underlying OS API call fails.
+///
+/// ## System APIs Used
+/// - [`mach_task_self`](https://developer.apple.com/documentation/kernel/mach_task_self)
+/// - [`mach_vm_allocate`](https://developer.apple.com/documentation/kernel/mach_vm_allocate)
+/// - [`mach_vm_remap`](https://developer.apple.com/documentation/kernel/mach_vm_remap)
 pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
         virtual_size > 0
@@ -62,7 +93,28 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     Ok(low_half_addr as *mut u8)
 }
 
-/// Deallocates a mirrored memory region allocated with `allocate_mirrored`.
+/// Deallocates a mirrored memory region created by `allocate_mirrored`.
+///
+/// This function deallocates the entire virtual address space.
+///
+/// # Arguments
+///
+/// * `ptr`: Pointer to the memory region to deallocate
+/// * `virtual_size`: The size of the virtual memory region
+///
+/// # Safety
+///
+/// The caller MUST ensure `ptr` is the valid pointer and `size` is the exact,
+/// `virtual_size` is same as the one passed to `allocate_mirrored`.
+/// This function must be called exactly once per allocation.
+///
+/// # Errors
+///
+/// Returns an `Err` if any underlying OS deallocation step fails.
+///
+/// ## System APIs Used
+/// - [`mach_task_self`](https://developer.apple.com/documentation/kernel/mach_task_self)
+/// - [`mach_vm_deallocate`](https://developer.apple.com/documentation/kernel/mach_vm_deallocate)
 pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(

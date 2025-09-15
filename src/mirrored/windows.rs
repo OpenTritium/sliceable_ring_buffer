@@ -27,6 +27,9 @@ use windows::{
 ///
 /// The allocation granularity is the smallest unit for which virtual memory can be reserved.
 /// This function caches the value after the first call to minimize subsequent syscalls.
+///
+/// ## System APIs Used
+/// - [`GetSystemInfo`](https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsysteminfo)
 pub(crate) fn allocation_granularity() -> usize {
     const UNINIT_ALLOCATION_GRANULARITY: usize = 0;
     static ALLOCATION_GRANULARITY: AtomicUsize = AtomicUsize::new(0);
@@ -81,6 +84,13 @@ pub(crate) fn allocation_granularity() -> usize {
 /// # Errors
 ///
 /// Returns an `Err` if any underlying OS API call fails.
+///
+/// ## System APIs Used
+/// - [`CreateFileMappingW`](https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfilemappingw)
+/// - [`VirtualAlloc2`](https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc2)
+/// - [`VirtualFree`](https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree)
+/// - [`MapViewOfFile3`](https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-mapviewoffile3)
+/// - [`CloseHandle`](https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle)
 pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
         virtual_size.is_multiple_of(allocation_granularity() * 2)

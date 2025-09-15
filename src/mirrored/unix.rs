@@ -20,6 +20,13 @@ fn nonnull_into_nonzerousize(ptr: NonNull<c_void>) -> NonZeroUsize {
     unsafe { NonZeroUsize::new_unchecked(ptr.as_ptr() as usize) }
 }
 
+/// Retrieves the system's memory allocation granularity (page size), caching the value for performance.
+///
+/// This function caches the value after the first call to minimize subsequent syscalls.
+///
+/// ## System APIs Used
+/// - Linux/Android: [`sysconf(_SC_PAGE_SIZE)`](https://man7.org/linux/man-pages/man3/sysconf.3.html)
+/// - Other Unix: [`sysconf(_SC_PAGE_SIZE)`](https://man7.org/linux/man-pages/man3/sysconf.3.html)
 pub(crate) fn allocation_granularity() -> usize {
     const UNINIT_ALLOCATION_GRANULARITY: usize = 0;
     static ALLOCATION_GRANULARITY: AtomicUsize = AtomicUsize::new(0);
@@ -39,15 +46,24 @@ pub(crate) fn allocation_granularity() -> usize {
     }
 }
 
+/// Creates a file descriptor for anonymous shared memory on Linux/Android.
+///
+/// ## System APIs Used
+/// - Linux/Android: [`memfd_create`](https://man7.org/linux/man-pages/man2/memfd_create.2.html)
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn create_mem_fd() -> AnyResult<OwnedFd> {
     use nix::sys::memfd::{MFdFlags, memfd_create};
     let fd = memfd_create("mirrored_buffer", MFdFlags::MFD_CLOEXEC)?;
     Ok(fd)
 }
+
 #[cfg(all(target_family = "unix", not(any(target_os = "linux", target_os = "android"))))]
 fn get_random_str(n: usize) -> Box<str> { std::iter::repeat_with(|| fastrand::alphanumeric()).take(n).collect() }
 
+/// Creates a file descriptor for anonymous shared memory on Unix systems (except Linux/Android).
+///
+/// ## System APIs Used
+/// - Other Unix: [`shm_open`](https://man7.org/linux/man-pages/man3/shm_open.3.html), [`shm_unlink`](https://man7.org/linux/man-pages/man3/shm_unlink.3.html)
 #[cfg(all(target_family = "unix", not(any(target_os = "linux", target_os = "android"))))]
 fn create_mem_fd() -> AnyResult<OwnedFd> {
     use nix::{
@@ -63,6 +79,40 @@ fn create_mem_fd() -> AnyResult<OwnedFd> {
     Ok(fd)
 }
 
+/// Allocates a mirrored memory buffer, ideal for high-performance circular buffers.
+///
+/// This is achieved by mapping a single underlying physical memory region to two contiguous
+/// virtual memory regions. Writes to the first half `[0, size/2)` are mirrored to the
+/// second half `[size/2, size)`, and vice versa.
+///
+/// # Arguments
+///
+/// * `virtual_size`: The total virtual size of the buffer. This must be a non-zero, even multiple of the system's
+///   `allocation_granularity()`. The usable ring buffer capacity will be `virtual_size / 2`.
+///
+/// # Returns
+///
+/// On success, returns a raw pointer to the start of the `virtual_size`-byte mirrored region.
+///
+/// # Safety
+///
+/// The caller is responsible for the following invariants:
+/// - The memory must be deallocated **exactly once** using `deallocate_mirrored` with the same `virtual_size`. Do not
+///   use `Box` or other allocators.
+/// - All memory access must be within the `[0, virtual_size)` bounds.
+///
+/// # Errors
+///
+/// Returns an `Err` if any underlying OS API call fails.
+///
+/// ## System APIs Used
+/// - Linux/Android: [`memfd_create`](https://man7.org/linux/man-pages/man2/memfd_create.2.html), [`mmap`](https://man7.org/linux/man-pages/man2/mmap.2.html),
+///   [`mmap_anonymous`](https://man7.org/linux/man-pages/man2/mmap.2.html), [`munmap`](https://man7.org/linux/man-pages/man2/munmap.2.html),
+///   [`ftruncate`](https://man7.org/linux/man-pages/man2/ftruncate.2.html), [`close`](https://man7.org/linux/man-pages/man2/close.2.html)
+/// - Other Unix: [`shm_open`](https://man7.org/linux/man-pages/man3/shm_open.3.html), [`shm_unlink`](https://man7.org/linux/man-pages/man3/shm_unlink.3.html),
+///   [`mmap`](https://man7.org/linux/man-pages/man2/mmap.2.html), [`mmap_anonymous`](https://man7.org/linux/man-pages/man2/mmap.2.html),
+///   [`munmap`](https://man7.org/linux/man-pages/man2/munmap.2.html), [`ftruncate`](https://man7.org/linux/man-pages/man2/ftruncate.2.html),
+///   [`close`](https://man7.org/linux/man-pages/man2/close.2.html)
 pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
         virtual_size > 0
@@ -126,6 +176,22 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     Ok(low_view.as_ptr() as *mut u8)
 }
 
+/// Deallocates a mirrored memory region created by `allocate_mirrored`.
+///
+/// This function unmaps the entire virtual address space.
+///
+/// # Safety
+///
+/// The caller MUST ensure `ptr` is the valid pointer and `size` is the exact,
+/// `virtual_size` is same as the one passed to `allocate_mirrored`.
+/// This function must be called exactly once per allocation.
+///
+/// # Errors
+///
+/// Returns an `Err` if any underlying OS deallocation step fails.
+///
+/// ## System APIs Used
+/// - All Unix: [`munmap`](https://man7.org/linux/man-pages/man2/munmap.2.html)
 pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
