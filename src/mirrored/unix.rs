@@ -65,13 +65,15 @@ fn create_mem_fd() -> AnyResult<OwnedFd> {
 
 pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
-        virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity() * 2) && virtual_size <= MAX_VIRTUAL_BUF_SIZE,
-        "virtual_size must be a non-zero, even multiple of allocation_granularity()"
+        virtual_size > 0
+            && virtual_size.is_multiple_of(allocation_granularity() * 2)
+            && virtual_size <= MAX_VIRTUAL_BUF_SIZE,
+        "virtual_size must be a non-zero, even multiple of double allocation_granularity()"
     );
     let physical_size = virtual_size / 2;
     debug_assert!(
         physical_size != 0 && physical_size <= MAX_PHYSICAL_BUF_SIZE,
-        "physical_size must be in range (0, isize::MAX)"
+        "physical_size must be in range (0, iMAX_PHYSICAL_BUF_SIZE)"
     );
     let fd = create_mem_fd()?;
     ftruncate(fd.as_fd(), physical_size as _)?;
@@ -125,10 +127,12 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
 }
 
 pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
-    debug_assert!(!ptr.is_null(), "ptr must be a valid pointer");
+    debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
-        virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity() * 2),
-        "virtual_size must be a non-zero multiple of allocation_granularity()"
+        virtual_size > 0
+            && virtual_size.is_multiple_of(allocation_granularity() * 2)
+            && virtual_size <= MAX_VIRTUAL_BUF_SIZE,
+        "virtual_size must be a non-zero multiple of double allocation_granularity()"
     );
     unsafe { munmap(NonNull::new_unchecked(ptr as *mut c_void), virtual_size) }
         .with_context(|| format!("Failed to deallocate mirrored memory with munmap. Errno: {}", Errno::last()))?;

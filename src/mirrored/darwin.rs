@@ -29,7 +29,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     );
     let virtual_size = virtual_size as mach_vm_size_t;
     let physical_size = virtual_size / 2;
-    debug_assert!(physical_size != 0 && physical_size <= MAX_PHYSICAL_BUF_SIZE);
+    debug_assert!(physical_size != 0 && physical_size <= MAX_PHYSICAL_BUF_SIZE as u64);
     let this_task = unsafe { mach_task_self() };
     let mut placeholder_addr = MaybeUninit::<mach_vm_address_t>::uninit();
     let result = unsafe { mach_vm_allocate(this_task, placeholder_addr.as_mut_ptr(), virtual_size, VM_FLAGS_ANYWHERE) };
@@ -64,7 +64,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
 
 /// Deallocates a mirrored memory region allocated with `allocate_mirrored`.
 pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
-    debug_assert!(!ptr.is_null(), "ptr must be a valid pointer");
+    debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
         virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity() * 2),
         "virtual_size must be a non-zero, even multiple of allocation_granularity()"

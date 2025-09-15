@@ -5,6 +5,7 @@ use std::mem::{SizedTypeProperties, size_of};
 /// Calculates the byte size of a mirrored allocation, typically used for implementing a ring buffer.
 /// To ensure a valid virtual memory mapping, the size of a single mirrored region must be a
 /// common multiple of `sizeof::<T>()` and the system's allocation granularity.
+#[inline]
 pub(crate) fn mirrored_allocation_unit<T>(count: usize) -> usize {
     if count == 0 || T::IS_ZST {
         return 0;
