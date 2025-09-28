@@ -18,7 +18,7 @@ use std::mem::MaybeUninit;
 ///
 /// ## System APIs Used
 /// - `vm_page_size`
-#[inline(always)]
+#[inline]
 pub(crate) fn allocation_granularity() -> usize { unsafe { vm_page_size as usize } }
 
 /// Allocates a mirrored memory buffer, ideal for high-performance circular buffers.

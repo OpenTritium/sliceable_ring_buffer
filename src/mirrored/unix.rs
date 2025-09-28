@@ -1,4 +1,7 @@
 //! Non-racy unix-specific mirrored memory allocation.
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
 
 use crate::mirrored::{MAX_PHYSICAL_BUF_SIZE, MAX_VIRTUAL_BUF_SIZE};
 use anyhow::{Context, Result as AnyResult};
@@ -15,7 +18,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-#[inline(always)]
+#[inline]
 fn nonnull_into_nonzerousize(ptr: NonNull<c_void>) -> NonZeroUsize {
     unsafe { NonZeroUsize::new_unchecked(ptr.as_ptr() as usize) }
 }
@@ -24,10 +27,15 @@ fn nonnull_into_nonzerousize(ptr: NonNull<c_void>) -> NonZeroUsize {
 ///
 /// This function caches the value after the first call to minimize subsequent syscalls.
 ///
+/// Memory allocation granularity (page size) varies by platform:
+/// - Linux/Android: Typically 4KB (4096 bytes), but can be 64KB on some ARM64 systems
+/// - macOS: Usually 4KB on Intel systems, 16KB on Apple Silicon
+/// - Other Unix systems (FreeBSD, OpenBSD, etc.): Typically 4KB
+///
 /// ## System APIs Used
 /// - Linux/Android: [`sysconf(_SC_PAGE_SIZE)`](https://man7.org/linux/man-pages/man3/sysconf.3.html)
 /// - Other Unix: [`sysconf(_SC_PAGE_SIZE)`](https://man7.org/linux/man-pages/man3/sysconf.3.html)
-pub(crate) fn allocation_granularity() -> usize {
+pub fn allocation_granularity() -> usize {
     const UNINIT_ALLOCATION_GRANULARITY: usize = 0;
     static ALLOCATION_GRANULARITY: AtomicUsize = AtomicUsize::new(0);
     let cached_val = ALLOCATION_GRANULARITY.load(Ordering::Acquire);
@@ -113,7 +121,7 @@ fn create_mem_fd() -> AnyResult<OwnedFd> {
 ///   [`mmap`](https://man7.org/linux/man-pages/man2/mmap.2.html), [`mmap_anonymous`](https://man7.org/linux/man-pages/man2/mmap.2.html),
 ///   [`munmap`](https://man7.org/linux/man-pages/man2/munmap.2.html), [`ftruncate`](https://man7.org/linux/man-pages/man2/ftruncate.2.html),
 ///   [`close`](https://man7.org/linux/man-pages/man2/close.2.html)
-pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
+pub unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
         virtual_size > 0
             && virtual_size.is_multiple_of(allocation_granularity() * 2)
@@ -158,7 +166,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     let low_half_addr = placeholder;
     let high_half_addr = unsafe { placeholder.byte_add(physical_size) };
     let low_view = map_view(low_half_addr, fd.as_fd())
-        .with_context(|| format!("Failed to map low half at {:?}", low_half_addr))
+        .with_context(|| format!("Failed to map low half at {low_half_addr:?}"))
         .inspect_err(|_| {
             #[cfg(any(target_os = "linux", target_os = "android"))]
             {
@@ -173,7 +181,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     close(fd).context("Failed to close file descriptor")?;
     debug_assert_eq!(low_view, placeholder);
     debug_assert_eq!(high_view, unsafe { placeholder.byte_add(physical_size) });
-    Ok(low_view.as_ptr() as *mut u8)
+    Ok(low_view.as_ptr().cast::<u8>())
 }
 
 /// Deallocates a mirrored memory region created by `allocate_mirrored`.
@@ -192,7 +200,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
 ///
 /// ## System APIs Used
 /// - All Unix: [`munmap`](https://man7.org/linux/man-pages/man2/munmap.2.html)
-pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
+pub unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
         virtual_size > 0
@@ -200,7 +208,7 @@ pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> A
             && virtual_size <= MAX_VIRTUAL_BUF_SIZE,
         "virtual_size must be a non-zero multiple of double allocation_granularity()"
     );
-    unsafe { munmap(NonNull::new_unchecked(ptr as *mut c_void), virtual_size) }
+    unsafe { munmap(NonNull::new_unchecked(ptr.cast::<c_void>()), virtual_size) }
         .with_context(|| format!("Failed to deallocate mirrored memory with munmap. Errno: {}", Errno::last()))?;
     Ok(())
 }
