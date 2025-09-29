@@ -19,7 +19,7 @@ use std::mem::MaybeUninit;
 /// ## System APIs Used
 /// - `vm_page_size`
 #[inline]
-pub(crate) fn allocation_granularity() -> usize { unsafe { vm_page_size as usize } }
+pub fn allocation_granularity() -> usize { unsafe { vm_page_size as usize } }
 
 /// Allocates a mirrored memory buffer, ideal for high-performance circular buffers.
 ///
@@ -51,7 +51,7 @@ pub(crate) fn allocation_granularity() -> usize { unsafe { vm_page_size as usize
 /// - `mach_task_self`
 /// - [`mach_vm_allocate`](https://developer.apple.com/documentation/kernel/1402376-mach_vm_allocate)
 /// - [`mach_vm_remap`](https://developer.apple.com/documentation/kernel/1402218-mach_vm_remap)
-pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
+pub unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
         virtual_size > 0
             && virtual_size.is_multiple_of(allocation_granularity() * 2)
@@ -65,7 +65,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     let mut placeholder_addr = MaybeUninit::<mach_vm_address_t>::uninit();
     let result = unsafe { mach_vm_allocate(this_task, placeholder_addr.as_mut_ptr(), virtual_size, VM_FLAGS_ANYWHERE) };
     if result != KERN_SUCCESS {
-        bail!("mach_vm_allocate for the placeholder region failed with error: {}", result);
+        bail!("mach_vm_allocate for the placeholder region failed with error: {result}");
     }
     let low_half_addr = unsafe { placeholder_addr.assume_init() };
     let mut high_half_addr = low_half_addr + physical_size;
@@ -87,7 +87,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
     };
     if result != KERN_SUCCESS {
         unsafe { mach_vm_deallocate(this_task, low_half_addr, virtual_size) };
-        bail!("mach_vm_remap failed with error: {}", result);
+        bail!("mach_vm_remap failed with error: {result}");
     }
     debug_assert_eq!(high_half_addr, low_half_addr + physical_size);
     Ok(low_half_addr as *mut u8)
@@ -115,7 +115,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
 /// ## System APIs Used
 /// - `mach_task_self`
 /// - [`mach_vm_deallocate`](https://developer.apple.com/documentation/kernel/1402285-mach_vm_deallocate)
-pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
+pub unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
         virtual_size > 0 && virtual_size.is_multiple_of(allocation_granularity() * 2),
@@ -124,7 +124,7 @@ pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> A
     let this_task = unsafe { mach_task_self() };
     let result = unsafe { mach_vm_deallocate(this_task, ptr as mach_vm_address_t, virtual_size as mach_vm_size_t) };
     if result != KERN_SUCCESS {
-        bail!("mach_vm_deallocate failed with error: {}", result);
+        bail!("mach_vm_deallocate failed with error: {result}");
     }
     Ok(())
 }

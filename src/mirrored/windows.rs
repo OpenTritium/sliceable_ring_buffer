@@ -30,7 +30,7 @@ use windows::{
 ///
 /// ## System APIs Used
 /// - [`GetSystemInfo`](https://docs.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsysteminfo)
-pub(crate) fn allocation_granularity() -> usize {
+pub fn allocation_granularity() -> usize {
     const UNINIT_ALLOCATION_GRANULARITY: usize = 0;
     static ALLOCATION_GRANULARITY: AtomicUsize = AtomicUsize::new(0);
     let cached_val = ALLOCATION_GRANULARITY.load(Ordering::Acquire);
@@ -91,7 +91,7 @@ pub(crate) fn allocation_granularity() -> usize {
 /// - [`VirtualFree`](https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree)
 /// - [`MapViewOfFile3`](https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-mapviewoffile3)
 /// - [`CloseHandle`](https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle)
-pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
+pub unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8> {
     debug_assert!(
         virtual_size.is_multiple_of(allocation_granularity() * 2)
             && virtual_size > 0
@@ -104,7 +104,9 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
         physical_size != 0 && physical_size <= MAX_PHYSICAL_BUF_SIZE,
         "physical_size must be in range (0, MAX_PHYSICAL_BUF_SIZE)"
     );
+    #[allow(clippy::cast_possible_truncation)]
     let max_size_low = physical_size as u32;
+    #[allow(clippy::cast_possible_truncation)]
     let max_size_high = (physical_size >> 32) as u32;
     unsafe {
         let file_mapping = CreateFileMappingW(
@@ -173,7 +175,7 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
         // The file mapping handle can now be closed. The OS will keep the underlying section alive until all views are
         // unmapped.
         CloseHandle(file_mapping)?;
-        Ok(low_half_addr as *mut u8)
+        Ok(low_half_addr.cast::<u8>())
     }
 }
 
@@ -192,8 +194,8 @@ pub(crate) unsafe fn allocate_mirrored(virtual_size: usize) -> AnyResult<*mut u8
 ///
 /// Returns an `Err` if any underlying OS deallocation step fails. The function
 /// attempts all cleanup steps regardless of intermediate failures.
-pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
-    let ptr = ptr as *mut c_void;
+pub unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> AnyResult<()> {
+    let ptr = ptr.cast::<c_void>();
     debug_assert!(!ptr.is_null() && ptr.is_aligned(), "ptr must be a valid pointer and aligned");
     debug_assert!(
         virtual_size.is_multiple_of(allocation_granularity() * 2)
@@ -217,9 +219,8 @@ pub(crate) unsafe fn deallocate_mirrored(ptr: *mut u8, virtual_size: usize) -> A
         // no need to free the placeholder, it already has been freed by the unmap operation
         if unmap_low_result.is_err() || unmap_high_result.is_err() {
             bail!(
-                "Failed to fully deallocate mirrored memory. Status: [Unmap Low: {:?}, Unmap High: {:?}]",
-                unmap_low_result,
-                unmap_high_result,
+                "Failed to fully deallocate mirrored memory. Status: [Unmap Low: {unmap_low_result:?}, Unmap High: \
+                 {unmap_high_result:?}]",
             )
         }
     }
@@ -248,6 +249,7 @@ mod tests {
         let ptr = unsafe { allocate_mirrored(virtual_size).expect("Allocation failed") };
         unsafe {
             let full_slice = slice::from_raw_parts_mut(ptr, virtual_size);
+            #[allow(clippy::cast_possible_truncation)]
             let test_data = (0..physical_size).map(|i| (i % 256) as u8).collect::<Vec<u8>>();
             full_slice[..physical_size].copy_from_slice(&test_data);
             let second_half = &full_slice[physical_size..];

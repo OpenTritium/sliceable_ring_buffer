@@ -15,10 +15,10 @@ pub use unix::*;
 mod darwin;
 
 #[cfg(target_vendor = "apple")]
-pub(crate) use darwin::*;
+pub use darwin::*;
 
 #[cfg(windows)]
 mod windows;
 
 #[cfg(windows)]
-pub(crate) use windows::*;
+pub use windows::*;
