@@ -8,7 +8,7 @@ homepage = "https://github.com/OpenTritium/sliceable_ring_buffer"
 repository = "https://github.com/OpenTritium/sliceable_ring_buffer"
 readme = "README.md"
 keywords = ["collection", "deque", "ring", "circular", "buffer"]
-categories = ["data-structures", "no-std"]
+categories = ["data-structures"]
 license = "MIT OR Apache-2.0"
 edition = "2024"
 
