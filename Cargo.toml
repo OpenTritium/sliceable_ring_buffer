@@ -1,10 +1,11 @@
 [package]
 name = "sliceable-ring-buffer"
-version = "0.3.4"
+version = "0.1.0"
 authors = ["OpenTritium <tritium404@hotmail.com>"]
 description = "A double-ended queue that Deref's into a slice."
 documentation = "https://docs.rs/crate/sliceable-ring-buffer/"
-repository = "https://github.com/OpenTritium/slice_ring_buffer"
+homepage = "https://github.com/OpenTritium/sliceable_ring_buffer"
+repository = "https://github.com/OpenTritium/sliceable_ring_buffer"
 readme = "README.md"
 keywords = ["collection", "deque", "ring", "circular", "buffer"]
 categories = ["data-structures", "no-std"]
@@ -31,7 +32,7 @@ fastrand = "2.3.0"
 [dependencies]
 num = { version = "0.4.3" }
 anyhow = { version = "1.0.100" }
-thiserror = { version = "2.0.16" }
+thiserror = { version = "2.0.17" }
 bytes = { version = "1.10.1", optional = true }
 serde = { version = "1.0.228", optional = true, features = ["derive"] }
 tokio = { version = "1.47.1", optional = true }
